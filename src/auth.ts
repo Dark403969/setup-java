@@ -4,109 +4,502 @@ import * as io from '@actions/io';
 
 import * as fs from 'fs';
 import * as os from 'os';
+import * as constants from './constants.js';
+import * as gpg from './gpg.js';
+import {getBooleanInput} from './util.js';
+import {escapeXmlText} from './xml.js';
 
-import { create as xmlCreate } from 'xmlbuilder2';
-import * as constants from './constants';
-import * as gpg from './gpg';
-import { getBooleanInput } from './util';
+export interface MavenServerCredentials {
+  id: string;
+  usernameEnvVar: string;
+  passwordEnvVar: string;
+  repositoryOrigins?: string[];
+}
 
-export const M2_DIR = '.m2';
-export const SETTINGS_FILE = 'settings.xml';
+export interface MavenRepository {
+  id: string;
+  url: string;
+  snapshotsEnabled: boolean;
+  releasesEnabled?: boolean;
+}
+
+export interface MavenRepositorySettings {
+  repositories: MavenRepository[];
+  pluginRepositories?: MavenRepository[];
+  includeCentral: boolean;
+  prioritizeCentral: boolean;
+}
+
+const MAVEN_REPOSITORY_ORIGIN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#@]+\/?$/;
 
 export async function configureAuthentication() {
-  const id = core.getInput(constants.INPUT_SERVER_ID);
-  const username = core.getInput(constants.INPUT_SERVER_USERNAME);
-  const password = core.getInput(constants.INPUT_SERVER_PASSWORD);
+  const servers = getMavenServerSettings();
+  const repositorySettings = getMavenRepositorySettings();
   const settingsDirectory =
-    core.getInput(constants.INPUT_SETTINGS_PATH) || path.join(os.homedir(), M2_DIR);
-  const overwriteSettings = getBooleanInput(constants.INPUT_OVERWRITE_SETTINGS, true);
+    core.getInput(constants.INPUT_SETTINGS_PATH) ||
+    path.join(os.homedir(), constants.M2_DIR);
+  const overwriteSettings = getBooleanInput(
+    constants.INPUT_OVERWRITE_SETTINGS,
+    true
+  );
   const gpgPrivateKey =
-    core.getInput(constants.INPUT_GPG_PRIVATE_KEY) || constants.INPUT_DEFAULT_GPG_PRIVATE_KEY;
-  const gpgPassphrase =
-    core.getInput(constants.INPUT_GPG_PASSPHRASE) ||
-    (gpgPrivateKey ? constants.INPUT_DEFAULT_GPG_PASSPHRASE : undefined);
+    core.getInput(constants.INPUT_GPG_PRIVATE_KEY) ||
+    constants.INPUT_DEFAULT_GPG_PRIVATE_KEY;
+  const gpgPassphraseEnvVar = getInputWithDeprecatedAlias(
+    constants.INPUT_GPG_PASSPHRASE_ENV_VAR,
+    constants.INPUT_GPG_PASSPHRASE_DEPRECATED,
+    gpgPrivateKey ? constants.INPUT_DEFAULT_GPG_PASSPHRASE : undefined
+  );
 
   if (gpgPrivateKey) {
     core.setSecret(gpgPrivateKey);
   }
 
   await createAuthenticationSettings(
-    id,
-    username,
-    password,
+    servers,
     settingsDirectory,
     overwriteSettings,
-    gpgPassphrase
+    gpgPassphraseEnvVar,
+    repositorySettings
   );
 
   if (gpgPrivateKey) {
     core.info('Importing private gpg key');
-    const keyFingerprint = (await gpg.importKey(gpgPrivateKey)) || '';
-    core.saveState(constants.STATE_GPG_PRIVATE_KEY_FINGERPRINT, keyFingerprint);
+    const gpgHome = await gpg.importKey(gpgPrivateKey);
+    try {
+      core.saveState(constants.STATE_GPG_HOME, gpgHome);
+      core.exportVariable('GNUPGHOME', gpg.toGpgPath(gpgHome));
+    } catch (error) {
+      await gpg.removeGpgHome(gpgHome);
+      throw error;
+    }
   }
 }
 
+export function getInputWithDeprecatedAlias(
+  inputName: string,
+  deprecatedInputName: string,
+  defaultValue?: string
+): string {
+  const value = core.getInput(inputName);
+  const deprecatedValue = core.getInput(deprecatedInputName);
+
+  if (deprecatedValue) {
+    core.warning(
+      `The '${deprecatedInputName}' input is deprecated and may be removed in a future release. Please use '${inputName}' instead.`
+    );
+  }
+
+  return value || deprecatedValue || defaultValue || '';
+}
+
+// only exported for testing purposes
+export function getMavenServerSettings(): MavenServerCredentials[] {
+  const entries = core.getMultilineInput(
+    constants.INPUT_MVN_SERVER_CREDENTIALS
+  );
+
+  const servers = entries.some(entry => entry.trim())
+    ? parseMavenServerCredentials(entries)
+    : [
+        {
+          id: core.getInput(constants.INPUT_SERVER_ID),
+          usernameEnvVar: getInputWithDeprecatedAlias(
+            constants.INPUT_SERVER_USERNAME_ENV_VAR,
+            constants.INPUT_SERVER_USERNAME_DEPRECATED,
+            constants.INPUT_DEFAULT_SERVER_USERNAME
+          ),
+          passwordEnvVar: getInputWithDeprecatedAlias(
+            constants.INPUT_SERVER_PASSWORD_ENV_VAR,
+            constants.INPUT_SERVER_PASSWORD_DEPRECATED,
+            constants.INPUT_DEFAULT_SERVER_PASSWORD
+          )
+        }
+      ];
+
+  return addMavenServerRepositoryOrigins(
+    servers,
+    core.getMultilineInput(constants.INPUT_MVN_SERVER_REPOSITORY_ORIGINS)
+  );
+}
+
+// only exported for testing purposes
+export function parseMavenServerCredentials(
+  entries: string[]
+): MavenServerCredentials[] {
+  const servers: MavenServerCredentials[] = [];
+  const serverIds = new Set<string>();
+
+  entries.forEach((entry, index) => {
+    if (!entry.trim()) {
+      return;
+    }
+
+    const fields = entry.split(':');
+    if (fields.length !== 3) {
+      throw new Error(
+        `Invalid mvn-server-credentials entry at line ${index + 1}. Expected format: server-id:USERNAME_ENV:PASSWORD_ENV`
+      );
+    }
+
+    const [id, usernameEnvVar, passwordEnvVar] = fields.map(field =>
+      field.trim()
+    );
+    if (!id || !usernameEnvVar || !passwordEnvVar) {
+      throw new Error(
+        `Invalid mvn-server-credentials entry at line ${index + 1}. server-id, username environment variable, and password environment variable are required`
+      );
+    }
+    if (serverIds.has(id)) {
+      throw new Error(
+        `Duplicate server-id '${id}' in mvn-server-credentials input`
+      );
+    }
+
+    serverIds.add(id);
+    servers.push({id, usernameEnvVar, passwordEnvVar});
+  });
+
+  return servers;
+}
+
+// only exported for testing purposes
+export function addMavenServerRepositoryOrigins(
+  servers: MavenServerCredentials[],
+  entries: string[]
+): MavenServerCredentials[] {
+  const serverIds = new Set(servers.map(server => server.id));
+  const originsByServer = new Map<string, string[]>();
+
+  entries.forEach((entry, index) => {
+    if (!entry.trim()) {
+      return;
+    }
+
+    const separator = entry.indexOf(':');
+    if (separator <= 0 || separator === entry.length - 1) {
+      throw new Error(
+        `Invalid mvn-server-repository-origins entry at line ${index + 1}. Expected format: server-id:repository-origin`
+      );
+    }
+
+    const id = entry.slice(0, separator).trim();
+    const value = entry.slice(separator + 1).trim();
+    if (!id || !value) {
+      throw new Error(
+        `Invalid mvn-server-repository-origins entry at line ${index + 1}. Server ID and repository origin are required`
+      );
+    }
+    if (!serverIds.has(id)) {
+      throw new Error(
+        `Unknown server-id '${id}' in mvn-server-repository-origins at line ${index + 1}`
+      );
+    }
+
+    let url: URL;
+    try {
+      if (!MAVEN_REPOSITORY_ORIGIN.test(value)) {
+        throw new Error();
+      }
+      url = new URL(value);
+    } catch {
+      throw new Error(
+        `Invalid repository origin '${value}' in mvn-server-repository-origins at line ${index + 1}`
+      );
+    }
+    if (
+      !url.host ||
+      url.username ||
+      url.password ||
+      (url.pathname !== '' && url.pathname !== '/') ||
+      url.search ||
+      url.hash
+    ) {
+      throw new Error(
+        `Invalid repository origin '${value}' in mvn-server-repository-origins at line ${index + 1}`
+      );
+    }
+
+    const explicitPort = /:(\d+)\/?$/.exec(value)?.[1];
+    const port = explicitPort ? Number.parseInt(explicitPort, 10) : undefined;
+    const includePort =
+      port !== undefined &&
+      !(
+        (url.protocol === 'http:' && port === 80) ||
+        (url.protocol === 'https:' && port === 443)
+      );
+    const origin = `${url.protocol}//${url.hostname}${includePort ? `:${port}` : ''}`;
+    const origins = originsByServer.get(id) || [];
+    if (!origins.includes(origin)) {
+      origins.push(origin);
+      originsByServer.set(id, origins);
+    }
+  });
+
+  return servers.map(server => {
+    const repositoryOrigins = originsByServer.get(server.id);
+    return repositoryOrigins ? {...server, repositoryOrigins} : server;
+  });
+}
+
+// only exported for testing purposes
+export function getMavenRepositorySettings():
+  MavenRepositorySettings | undefined {
+  const entries = core.getMultilineInput(constants.INPUT_MVN_REPOSITORIES);
+  const pluginEntries = core.getMultilineInput(
+    constants.INPUT_MVN_PLUGIN_REPOSITORIES
+  );
+  if (
+    !entries.some(entry => entry.trim()) &&
+    !pluginEntries.some(entry => entry.trim())
+  ) {
+    return undefined;
+  }
+
+  const includeCentral = getBooleanInput(
+    constants.INPUT_MVN_REPOSITORIES_INCLUDE_CENTRAL,
+    true
+  );
+  return {
+    repositories: parseMavenRepositories(entries, includeCentral),
+    pluginRepositories: parseMavenRepositories(
+      pluginEntries,
+      includeCentral,
+      constants.INPUT_MVN_PLUGIN_REPOSITORIES
+    ),
+    includeCentral,
+    prioritizeCentral: getBooleanInput(
+      constants.INPUT_MVN_REPOSITORIES_PRIORITIZE_CENTRAL,
+      true
+    )
+  };
+}
+
+// only exported for testing purposes
+export function parseMavenRepositories(
+  entries: string[],
+  includeCentral: boolean,
+  inputName = constants.INPUT_MVN_REPOSITORIES
+): MavenRepository[] {
+  const repositories: MavenRepository[] = [];
+  const repositoryIds = new Set<string>();
+
+  entries.forEach((entry, index) => {
+    if (!entry.trim()) {
+      return;
+    }
+
+    const firstSeparator = entry.indexOf(':');
+    const lastSeparator = entry.lastIndexOf(':');
+    if (firstSeparator <= 0 || lastSeparator <= firstSeparator) {
+      throw new Error(
+        `Invalid ${inputName} entry at line ${index + 1}. Expected format: repository-id:repository-url:snapshots-enabled`
+      );
+    }
+
+    const id = entry.slice(0, firstSeparator).trim();
+    const url = entry.slice(firstSeparator + 1, lastSeparator).trim();
+    const snapshotsValue = entry
+      .slice(lastSeparator + 1)
+      .trim()
+      .toLowerCase();
+    if (!id || !url || !snapshotsValue) {
+      throw new Error(
+        `Invalid ${inputName} entry at line ${index + 1}. repository-id, repository URL, and snapshots-enabled are required`
+      );
+    }
+    if (snapshotsValue !== 'true' && snapshotsValue !== 'false') {
+      throw new Error(
+        `Invalid snapshots-enabled value '${snapshotsValue}' in ${inputName} entry at line ${index + 1}. Expected true or false`
+      );
+    }
+    if (repositoryIds.has(id)) {
+      throw new Error(`Duplicate repository-id '${id}' in ${inputName} input`);
+    }
+    if (includeCentral && id === constants.MAVEN_CENTRAL_REPOSITORY_ID) {
+      throw new Error(
+        `Repository-id '${constants.MAVEN_CENTRAL_REPOSITORY_ID}' is reserved when ${constants.INPUT_MVN_REPOSITORIES_INCLUDE_CENTRAL} is enabled`
+      );
+    }
+
+    repositoryIds.add(id);
+    repositories.push({
+      id,
+      url,
+      snapshotsEnabled: snapshotsValue === 'true'
+    });
+  });
+
+  return repositories;
+}
+
+function generateRepositorySection(
+  customRepositories: MavenRepository[],
+  settings: MavenRepositorySettings,
+  element: 'repository' | 'pluginRepository'
+): string[] {
+  if (!customRepositories.length && settings.includeCentral) {
+    return [];
+  }
+
+  const centralRepository: MavenRepository = {
+    id: constants.MAVEN_CENTRAL_REPOSITORY_ID,
+    url: constants.MAVEN_CENTRAL_REPOSITORY_URL,
+    snapshotsEnabled: false
+  };
+  const customCentralConfigured = customRepositories.some(
+    repository => repository.id === constants.MAVEN_CENTRAL_REPOSITORY_ID
+  );
+  const repositories = settings.includeCentral
+    ? settings.prioritizeCentral
+      ? [centralRepository, ...customRepositories]
+      : [...customRepositories, centralRepository]
+    : customCentralConfigured
+      ? customRepositories
+      : [...customRepositories, {...centralRepository, releasesEnabled: false}];
+  const container =
+    element === 'repository' ? 'repositories' : 'pluginRepositories';
+  const lines = [`      <${container}>`];
+
+  for (const repository of repositories) {
+    lines.push(
+      `        <${element}>`,
+      `          <id>${escapeXmlText(repository.id)}</id>`,
+      `          <url>${escapeXmlText(repository.url)}</url>`,
+      ...(repository.releasesEnabled === undefined
+        ? []
+        : [
+            '          <releases>',
+            `            <enabled>${repository.releasesEnabled}</enabled>`,
+            '          </releases>'
+          ]),
+      '          <snapshots>',
+      `            <enabled>${repository.snapshotsEnabled}</enabled>`,
+      '          </snapshots>',
+      `        </${element}>`
+    );
+  }
+  lines.push(`      </${container}>`);
+  return lines;
+}
+
 export async function createAuthenticationSettings(
-  id: string,
-  username: string,
-  password: string,
+  servers: MavenServerCredentials[],
   settingsDirectory: string,
   overwriteSettings: boolean,
-  gpgPassphrase: string | undefined = undefined
+  gpgPassphraseEnvVar: string | undefined = undefined,
+  repositorySettings: MavenRepositorySettings | undefined = undefined
 ) {
-  core.info(`Creating ${SETTINGS_FILE} with server-id: ${id}`);
+  core.info(
+    `Creating ${constants.MVN_SETTINGS_FILE} with server-id: ${servers.map(server => server.id).join(', ')}`
+  );
   // when an alternate m2 location is specified use only that location (no .m2 directory)
   // otherwise use the home/.m2/ path
   await io.mkdirP(settingsDirectory);
   await write(
     settingsDirectory,
-    generate(id, username, password, gpgPassphrase),
+    generate(servers, gpgPassphraseEnvVar, repositorySettings),
     overwriteSettings
   );
 }
 
 // only exported for testing purposes
 export function generate(
-  id: string,
-  username: string,
-  password: string,
-  gpgPassphrase?: string | undefined
+  servers: MavenServerCredentials[],
+  gpgPassphraseEnvVar?: string | undefined,
+  repositorySettings?: MavenRepositorySettings | undefined
 ) {
-  const xmlObj: { [key: string]: any } = {
-    settings: {
-      '@xmlns': 'http://maven.apache.org/SETTINGS/1.0.0',
-      '@xmlns:xsi': 'http://www.w3.org/2001/XMLSchema-instance',
-      '@xsi:schemaLocation':
-        'http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd',
-      servers: {
-        server: [
-          {
-            id: id,
-            username: `\${env.${username}}`,
-            password: `\${env.${password}}`
-          }
-        ]
-      }
-    }
-  };
+  // The maven-gpg-plugin reads the passphrase from the environment variable
+  // named by the `gpg.passphraseEnvName` property (default MAVEN_GPG_PASSPHRASE).
+  // Only configure it when the requested env var name differs from that default;
+  // otherwise the plugin already reads the right variable and no extra settings
+  // are needed. Writing `gpg.passphrase` to settings.xml is deprecated and fails
+  // when the plugin's `bestPractices` mode is enabled.
+  const includeGpgPassphraseProfile =
+    gpgPassphraseEnvVar &&
+    gpgPassphraseEnvVar !== constants.MAVEN_GPG_PASSPHRASE_DEFAULT_ENV;
 
-  if (gpgPassphrase) {
-    const gpgServer = {
-      id: 'gpg.passphrase',
-      passphrase: `\${env.${gpgPassphrase}}`
-    };
-    xmlObj.settings.servers.server.push(gpgServer);
+  const lines = [
+    '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"',
+    '  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
+    '  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">',
+    '  <interactiveMode>false</interactiveMode>',
+    '  <servers>'
+  ];
+
+  for (const server of servers) {
+    lines.push(
+      '    <server>',
+      `      <id>${escapeXmlText(server.id)}</id>`,
+      `      <username>${escapeXmlText(`\${env.${server.usernameEnvVar}}`)}</username>`,
+      `      <password>${escapeXmlText(`\${env.${server.passwordEnvVar}}`)}</password>`
+    );
+    if (server.repositoryOrigins) {
+      lines.push('      <repositoryOrigins>');
+      for (const origin of server.repositoryOrigins) {
+        lines.push(
+          `        <repositoryOrigin>${escapeXmlText(origin)}</repositoryOrigin>`
+        );
+      }
+      lines.push('      </repositoryOrigins>');
+    }
+    lines.push('    </server>');
+  }
+  lines.push('  </servers>');
+
+  if (repositorySettings || includeGpgPassphraseProfile) {
+    lines.push('  <profiles>');
+    if (repositorySettings) {
+      lines.push(
+        '    <profile>',
+        `      <id>${constants.MAVEN_REPOSITORIES_PROFILE_ID}</id>`,
+        ...generateRepositorySection(
+          repositorySettings.repositories,
+          repositorySettings,
+          'repository'
+        ),
+        ...generateRepositorySection(
+          repositorySettings.pluginRepositories ?? [],
+          repositorySettings,
+          'pluginRepository'
+        ),
+        '    </profile>'
+      );
+    }
+    if (includeGpgPassphraseProfile) {
+      lines.push(
+        '    <profile>',
+        `      <id>${constants.GPG_PASSPHRASE_PROFILE_ID}</id>`,
+        '      <properties>',
+        `        <gpg.passphraseEnvName>${escapeXmlText(gpgPassphraseEnvVar)}</gpg.passphraseEnvName>`,
+        '      </properties>',
+        '    </profile>'
+      );
+    }
+    lines.push('  </profiles>', '  <activeProfiles>');
+    if (repositorySettings) {
+      lines.push(
+        `    <activeProfile>${constants.MAVEN_REPOSITORIES_PROFILE_ID}</activeProfile>`
+      );
+    }
+    if (includeGpgPassphraseProfile) {
+      lines.push(
+        `    <activeProfile>${constants.GPG_PASSPHRASE_PROFILE_ID}</activeProfile>`
+      );
+    }
+    lines.push('  </activeProfiles>');
   }
 
-  return xmlCreate(xmlObj).end({
-    headless: true,
-    prettyPrint: true,
-    width: 80
-  });
+  lines.push('</settings>');
+  return lines.join('\n');
 }
 
-async function write(directory: string, settings: string, overwriteSettings: boolean) {
-  const location = path.join(directory, SETTINGS_FILE);
+async function write(
+  directory: string,
+  settings: string,
+  overwriteSettings: boolean
+) {
+  const location = path.join(directory, constants.MVN_SETTINGS_FILE);
   const settingsExists = fs.existsSync(location);
   if (settingsExists && overwriteSettings) {
     core.info(`Overwriting existing file ${location}`);

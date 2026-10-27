@@ -1,21 +1,49 @@
-import path = require('path');
-import io = require('@actions/io');
-import exec = require('@actions/exec');
+import {
+  jest,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterAll,
+  afterEach
+} from '@jest/globals';
+import {fileURLToPath} from 'url';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import * as io from '@actions/io';
 
-jest.mock('@actions/exec', () => {
-  return {
-    exec: jest.fn()
-  };
-});
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const mockTmpDir = jest.fn(os.tmpdir);
+
+jest.unstable_mockModule('os', () => ({
+  ...os,
+  default: {...os, tmpdir: mockTmpDir},
+  tmpdir: mockTmpDir
+}));
+
+jest.unstable_mockModule('@actions/exec', () => ({
+  exec: jest.fn()
+}));
+
+jest.unstable_mockModule('@actions/tool-cache', () => ({
+  downloadTool: jest.fn()
+}));
+
+const exec = await import('@actions/exec');
+const tc = await import('@actions/tool-cache');
+const gpg = await import('../src/gpg.js');
 
 const tempDir = path.join(__dirname, 'runner', 'temp');
 process.env['RUNNER_TEMP'] = tempDir;
 
-import gpg = require('../src/gpg');
-
 describe('gpg tests', () => {
   beforeEach(async () => {
+    await io.rmRF(tempDir);
     await io.mkdirP(tempDir);
+    jest.clearAllMocks();
+    mockTmpDir.mockImplementation(os.tmpdir);
+    (exec.exec as jest.Mock<any>).mockResolvedValue(0);
   });
 
   afterAll(async () => {
@@ -26,23 +54,338 @@ describe('gpg tests', () => {
     }
   });
 
-  describe('importKey', () => {
-    it('attempts to import private key and returns null key id on failure', async () => {
-      const privateKey = 'KEY CONTENTS';
-      const keyId = await gpg.importKey(privateKey);
+  describe('toGpgPath', () => {
+    const originalPlatform = process.platform;
 
-      expect(keyId).toBeNull();
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', {value: originalPlatform});
+    });
 
-      expect(exec.exec).toHaveBeenCalledWith('gpg', expect.anything(), expect.anything());
+    it('returns path unchanged on non-Windows platforms', () => {
+      Object.defineProperty(process, 'platform', {value: 'linux'});
+      expect(gpg.toGpgPath('/tmp/some/path')).toBe('/tmp/some/path');
+      expect(gpg.toGpgPath('D:\\a\\_temp\\file')).toBe('D:\\a\\_temp\\file');
+    });
+
+    it('converts Windows backslashes and drive letter to POSIX path on Windows', () => {
+      Object.defineProperty(process, 'platform', {value: 'win32'});
+      expect(gpg.toGpgPath('D:\\a\\_temp\\gpg-home')).toBe(
+        '/d/a/_temp/gpg-home'
+      );
+      expect(
+        gpg.toGpgPath('C:\\Users\\runner\\AppData\\Local\\Temp\\key.asc')
+      ).toBe('/c/Users/runner/AppData/Local/Temp/key.asc');
+    });
+
+    it('handles uppercase and lowercase drive letters on Windows', () => {
+      Object.defineProperty(process, 'platform', {value: 'win32'});
+      expect(gpg.toGpgPath('d:\\a\\_temp\\file')).toBe('/d/a/_temp/file');
     });
   });
 
-  describe('deleteKey', () => {
-    it('deletes private key', async () => {
-      const keyId = 'asdfhjkl';
-      await gpg.deleteKey(keyId);
+  describe('importKey', () => {
+    it('imports private keys into a unique isolated GPG home', async () => {
+      const privateKey = 'KEY CONTENTS';
+      let privateKeyFile = '';
+      (exec.exec as jest.Mock<any>).mockImplementation(
+        async (_command: string, _args: string[]) => {
+          const [createdGpgHome] = fs.readdirSync(tempDir);
+          privateKeyFile = path.join(
+            tempDir,
+            createdGpgHome,
+            fs
+              .readdirSync(path.join(tempDir, createdGpgHome))
+              .find(file => file.startsWith('private-key-')) ?? ''
+          );
+          expect(fs.readFileSync(privateKeyFile, 'utf8')).toBe(privateKey);
+          if (process.platform !== 'win32') {
+            expect(fs.statSync(privateKeyFile).mode & 0o777).toBe(0o600);
+          }
+          return 0;
+        }
+      );
 
-      expect(exec.exec).toHaveBeenCalledWith('gpg', expect.anything(), expect.anything());
+      const gpgHome = await gpg.importKey(privateKey);
+
+      expect(path.dirname(gpgHome)).toBe(tempDir);
+      expect(path.basename(gpgHome).startsWith(gpg.GPG_HOME_PREFIX)).toBe(true);
+      expect(fs.existsSync(gpgHome)).toBe(true);
+      expect(fs.existsSync(privateKeyFile)).toBe(false);
+      if (process.platform !== 'win32') {
+        expect(fs.statSync(gpgHome).mode & 0o777).toBe(0o700);
+      }
+      expect(exec.exec).toHaveBeenCalledWith(
+        'gpg',
+        [
+          '--homedir',
+          gpg.toGpgPath(gpgHome),
+          '--batch',
+          '--import',
+          gpg.toGpgPath(privateKeyFile)
+        ],
+        {silent: true}
+      );
+    });
+
+    it('removes the private-key file and isolated home when import fails', async () => {
+      let gpgHome = '';
+      let privateKeyFile = '';
+      (exec.exec as jest.Mock<any>).mockImplementation(
+        async (_command: string, _args: string[]) => {
+          const [createdGpgHome] = fs.readdirSync(tempDir);
+          gpgHome = path.join(tempDir, createdGpgHome);
+          privateKeyFile = path.join(
+            gpgHome,
+            fs
+              .readdirSync(gpgHome)
+              .find(file => file.startsWith('private-key-')) ?? ''
+          );
+          expect(fs.existsSync(privateKeyFile)).toBe(true);
+          throw new Error('invalid key');
+        }
+      );
+
+      await expect(gpg.importKey('INVALID KEY')).rejects.toThrow('invalid key');
+
+      expect(fs.existsSync(privateKeyFile)).toBe(false);
+      expect(fs.existsSync(gpgHome)).toBe(false);
+    });
+
+    it('imports multi-key input without parsing or deleting fingerprints', async () => {
+      const privateKeys = 'KEY ONE\nKEY TWO';
+      (exec.exec as jest.Mock<any>).mockImplementation(
+        async (_command: string, _args: string[]) => {
+          const [createdGpgHome] = fs.readdirSync(tempDir);
+          const keyFile = fs
+            .readdirSync(path.join(tempDir, createdGpgHome))
+            .find(file => file.startsWith('private-key-'));
+          expect(
+            fs.readFileSync(
+              path.join(tempDir, createdGpgHome, keyFile ?? ''),
+              'utf8'
+            )
+          ).toBe(privateKeys);
+          return 0;
+        }
+      );
+
+      const gpgHome = await gpg.importKey(privateKeys);
+
+      expect(gpgHome).toContain(gpg.GPG_HOME_PREFIX);
+      expect(exec.exec).toHaveBeenCalledTimes(1);
+      expect((exec.exec as jest.Mock).mock.calls[0][1]).not.toContain(
+        '--delete-secret-and-public-key'
+      );
+    });
+
+    it('uses a separate GPG home for each invocation', async () => {
+      const firstGpgHome = await gpg.importKey('FIRST KEY');
+      const secondGpgHome = await gpg.importKey('SECOND KEY');
+
+      expect(firstGpgHome).not.toBe(secondGpgHome);
+      expect(fs.existsSync(firstGpgHome)).toBe(true);
+      expect(fs.existsSync(secondGpgHome)).toBe(true);
+    });
+  });
+
+  describe('removeGpgHome', () => {
+    it('removes only action-owned GPG homes and is idempotent', async () => {
+      const gpgHome = await gpg.importKey('KEY CONTENTS');
+      const unrelatedGpgHome = path.join(tempDir, 'user-gpg-home');
+      fs.mkdirSync(unrelatedGpgHome);
+
+      await gpg.removeGpgHome(gpgHome);
+      await gpg.removeGpgHome(gpgHome);
+
+      expect(exec.exec).toHaveBeenNthCalledWith(
+        2,
+        'gpgconf',
+        ['--homedir', gpg.toGpgPath(gpgHome), '--kill', 'gpg-agent'],
+        {silent: true, ignoreReturnCode: true}
+      );
+      expect(exec.exec).toHaveBeenCalledTimes(2);
+      expect(fs.existsSync(gpgHome)).toBe(false);
+      expect(fs.existsSync(unrelatedGpgHome)).toBe(true);
+    });
+
+    it('removes the GPG home when gpgconf is unavailable', async () => {
+      const gpgHome = await gpg.importKey('KEY CONTENTS');
+      (exec.exec as jest.Mock<any>).mockRejectedValueOnce(
+        new Error('gpgconf not found')
+      );
+
+      await gpg.removeGpgHome(gpgHome);
+
+      expect(fs.existsSync(gpgHome)).toBe(false);
+    });
+
+    it('refuses to remove a GPG home it does not own', async () => {
+      const unrelatedGpgHome = path.join(tempDir, 'user-gpg-home');
+      fs.mkdirSync(unrelatedGpgHome, {recursive: true});
+
+      await expect(gpg.removeGpgHome(unrelatedGpgHome)).rejects.toThrow(
+        'Refusing to remove unexpected GPG home'
+      );
+      expect(fs.existsSync(unrelatedGpgHome)).toBe(true);
+    });
+  });
+
+  describe('verifyPackageSignature', () => {
+    describe.each(['long', 'canonical macOS'])('%s TMPDIR', tempDirKind => {
+      afterEach(() => {
+        process.env['RUNNER_TEMP'] = tempDir;
+      });
+
+      it.each([
+        'success',
+        'import failure',
+        'verification failure',
+        'gpgconf unavailable'
+      ])(
+        'uses a short macOS home or RUNNER_TEMP elsewhere and cleans up after %s',
+        async outcome => {
+          const longRunnerTemp = path.join(
+            tempDir,
+            'long-runner-path-'.repeat(8)
+          );
+          const signaturePath = path.join(tempDir, 'jdk.tar.gz.sig');
+          const expectedParent =
+            process.platform === 'darwin' ? '/tmp' : longRunnerTemp;
+          let gpgHome = '';
+          process.env['RUNNER_TEMP'] = longRunnerTemp;
+          mockTmpDir.mockReturnValue(
+            tempDirKind === 'long'
+              ? longRunnerTemp
+              : `/private/var/folders/ab/${'c'.repeat(31)}/T`
+          );
+          fs.mkdirSync(longRunnerTemp, {recursive: true});
+          fs.writeFileSync(signaturePath, 'signature');
+          (tc.downloadTool as jest.Mock<any>).mockResolvedValue(signaturePath);
+          (exec.exec as jest.Mock<any>).mockImplementation(
+            async (command: string, args: string[]) => {
+              gpgHome = path.join(expectedParent, path.posix.basename(args[1]));
+              expect(args[1]).toBe(gpg.toGpgPath(gpgHome));
+              if (command === 'gpgconf') {
+                expect(fs.existsSync(gpgHome)).toBe(true);
+                if (outcome === 'gpgconf unavailable') {
+                  throw new Error('gpgconf unavailable');
+                }
+                return 0;
+              }
+              if (process.platform === 'darwin') {
+                expect(
+                  Buffer.byteLength(path.join(gpgHome, 'S.gpg-agent.browser'))
+                ).toBeLessThan(104);
+              }
+              expect(
+                fs.readFileSync(path.join(gpgHome, 'public-key-0.asc'), 'utf8')
+              ).toBe('public key');
+              if (process.platform !== 'win32') {
+                expect(fs.statSync(gpgHome).mode & 0o777).toBe(0o700);
+              }
+              if (
+                (outcome === 'import failure' && args.includes('--import')) ||
+                (outcome === 'verification failure' &&
+                  args.includes('--verify'))
+              ) {
+                throw new Error(outcome);
+              }
+              return 0;
+            }
+          );
+
+          const verification = gpg.verifyPackageSignature(
+            path.join(tempDir, 'jdk.tar.gz'),
+            'https://example.com/jdk.tar.gz.sig',
+            'public key'
+          );
+          if (outcome === 'success' || outcome === 'gpgconf unavailable') {
+            await verification;
+          } else {
+            await expect(verification).rejects.toThrow(outcome);
+          }
+          expect(exec.exec).toHaveBeenCalledTimes(
+            outcome === 'import failure' ? 2 : 3
+          );
+          expect(exec.exec).toHaveBeenLastCalledWith(
+            'gpgconf',
+            ['--homedir', gpg.toGpgPath(gpgHome), '--kill', 'gpg-agent'],
+            {silent: true, ignoreReturnCode: true}
+          );
+          expect(fs.existsSync(gpgHome)).toBe(false);
+          expect(fs.existsSync(signaturePath)).toBe(false);
+          expect(fs.readdirSync(longRunnerTemp)).toEqual([]);
+        }
+      );
+    });
+
+    it('imports bundled key and verifies package', async () => {
+      const publicKeyContent =
+        '-----BEGIN PGP PUBLIC KEY BLOCK-----\ntest\n-----END PGP PUBLIC KEY BLOCK-----';
+      (tc.downloadTool as jest.Mock<any>).mockResolvedValue(
+        '/tmp/jdk.tar.gz.sig'
+      );
+      await gpg.verifyPackageSignature(
+        '/tmp/jdk.tar.gz',
+        'https://example.com/jdk.tar.gz.sig',
+        publicKeyContent
+      );
+
+      expect(tc.downloadTool).toHaveBeenCalledWith(
+        'https://example.com/jdk.tar.gz.sig'
+      );
+      expect(exec.exec).toHaveBeenNthCalledWith(
+        1,
+        'gpg',
+        [
+          '--homedir',
+          expect.any(String),
+          '--batch',
+          '--import',
+          expect.stringContaining('public-key-0.asc')
+        ],
+        expect.objectContaining({silent: true})
+      );
+      expect(exec.exec).toHaveBeenNthCalledWith(
+        2,
+        'gpg',
+        [
+          '--homedir',
+          expect.any(String),
+          '--batch',
+          '--verify',
+          '/tmp/jdk.tar.gz.sig',
+          '/tmp/jdk.tar.gz'
+        ],
+        expect.objectContaining({silent: true})
+      );
+    });
+
+    it('imports multiple bundled keys before verifying the package', async () => {
+      (tc.downloadTool as jest.Mock<any>).mockResolvedValue(
+        '/tmp/jdk.tar.gz.sig'
+      );
+
+      await gpg.verifyPackageSignature(
+        '/tmp/jdk.tar.gz',
+        'https://example.com/jdk.tar.gz.sig',
+        ['public-key-a', 'public-key-b']
+      );
+
+      expect(exec.exec).toHaveBeenNthCalledWith(
+        1,
+        'gpg',
+        [
+          '--homedir',
+          expect.any(String),
+          '--batch',
+          '--import',
+          expect.stringContaining('public-key-0.asc'),
+          expect.stringContaining('public-key-1.asc')
+        ],
+        expect.objectContaining({silent: true})
+      );
+      expect(exec.exec).toHaveBeenCalledTimes(3);
     });
   });
 });

@@ -1,4 +1,152 @@
-import { isVersionSatisfies } from '../src/util';
+import {
+  jest,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterAll,
+  afterEach
+} from '@jest/globals';
+import {fileURLToPath} from 'url';
+import * as fs from 'fs';
+import * as path from 'path';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Mock @actions/core
+jest.unstable_mockModule('@actions/core', () => ({
+  getInput: jest.fn(),
+  getBooleanInput: jest.fn(),
+  getMultilineInput: jest.fn(),
+  setOutput: jest.fn(),
+  setFailed: jest.fn(),
+  warning: jest.fn(),
+  info: jest.fn(),
+  debug: jest.fn(),
+  error: jest.fn(),
+  notice: jest.fn(),
+  startGroup: jest.fn(),
+  endGroup: jest.fn(),
+  addPath: jest.fn(),
+  exportVariable: jest.fn(),
+  saveState: jest.fn(),
+  getState: jest.fn(),
+  setSecret: jest.fn(),
+  isDebug: jest.fn(() => false),
+  group: jest.fn((_name: string, fn: () => Promise<unknown>) => fn()),
+  toPlatformPath: jest.fn((p: string) => p),
+  toWin32Path: jest.fn((p: string) => p),
+  toPosixPath: jest.fn((p: string) => p)
+}));
+
+const core = await import('@actions/core');
+
+const {
+  convertVersionToSemver,
+  normalizeJavaVersionToSemver,
+  getNextPageUrlFromLinkHeader,
+  getVersionFromFileContent,
+  isVersionSatisfies,
+  isGhes,
+  validatePaginationUrl,
+  getLatestMajorVersion,
+  getBooleanInput,
+  isJdkCacheEnabled
+} = await import('../src/util.js');
+
+describe('getBooleanInput', () => {
+  let inputs: Record<string, string>;
+
+  beforeEach(() => {
+    inputs = {};
+    (core.getInput as jest.Mock).mockImplementation(
+      (name: string) => inputs[name] ?? ''
+    );
+  });
+
+  afterEach(() => {
+    jest.resetAllMocks();
+  });
+
+  it.each([
+    ['true', true],
+    ['TRUE', true],
+    ['TrUe', true],
+    [' true ', true],
+    ['false', false],
+    ['FALSE', false],
+    ['FaLsE', false],
+    [' false ', false]
+  ])('parses %j as %s', (value: string, expected: boolean) => {
+    inputs['boolean-input'] = value;
+
+    expect(getBooleanInput('boolean-input')).toBe(expected);
+  });
+
+  it.each([
+    [undefined, false],
+    [false, false],
+    [true, true]
+  ])(
+    'uses the configured default %s when the input is omitted',
+    (defaultValue: boolean | undefined, expected: boolean) => {
+      expect(getBooleanInput('boolean-input', defaultValue)).toBe(expected);
+    }
+  );
+
+  it('uses the configured default for a whitespace-only input', () => {
+    inputs['boolean-input'] = '   ';
+
+    expect(getBooleanInput('boolean-input', true)).toBe(true);
+  });
+
+  it.each([
+    'check-latest',
+    'force-download',
+    'set-default',
+    'verify-signature',
+    'overwrite-settings',
+    'show-download-progress',
+    'problem-matcher'
+  ])('rejects an invalid value for %s', inputName => {
+    inputs[inputName] = 'ture';
+
+    expect(() => getBooleanInput(inputName)).toThrow(
+      `Invalid value 'ture' for boolean input '${inputName}'. Expected 'true' or 'false'.`
+    );
+  });
+});
+
+describe('isJdkCacheEnabled', () => {
+  let inputs: Record<string, string>;
+
+  beforeEach(() => {
+    inputs = {};
+    (core.getInput as jest.Mock).mockImplementation(
+      (name: string) => inputs[name] ?? ''
+    );
+  });
+
+  afterEach(() => {
+    jest.resetAllMocks();
+  });
+
+  it.each([
+    ['', '', false],
+    ['', 'true', true],
+    ['', 'false', false],
+    ['maven', '', true],
+    ['maven', 'true', true],
+    ['maven', 'false', false]
+  ])(
+    'resolves cache=%j and cache-jdk=%j to %s',
+    (cache, cacheJdk, expected) => {
+      inputs['cache-jdk'] = cacheJdk;
+
+      expect(isJdkCacheEnabled(cache)).toBe(expected);
+    }
+  );
+});
 
 describe('isVersionSatisfies', () => {
   it.each([
@@ -14,9 +162,335 @@ describe('isVersionSatisfies', () => {
     ['2.5.1+3', '2.5.1+3', true],
     ['2.5.1+3', '2.5.1+2', false],
     ['15.0.0+14', '15.0.0+14.1.202003190635', false],
-    ['15.0.0+14.1.202003190635', '15.0.0+14.1.202003190635', true]
-  ])('%s, %s -> %s', (inputRange: string, inputVersion: string, expected: boolean) => {
-    const actual = isVersionSatisfies(inputRange, inputVersion);
+    ['15.0.0+14.1.202003190635', '15.0.0+14.1.202003190635', true],
+    // 4-segment versions (e.g. JetBrains Runtime '17.0.8.1+1080.1') are not
+    // valid semver — they should be rejected, not throw.
+    ['25.0.3+480.61', '17.0.8.1+1080.1', false],
+    ['17', '17.0.8.1+1080.1', false]
+  ])(
+    '%s, %s -> %s',
+    (inputRange: string, inputVersion: string, expected: boolean) => {
+      const actual = isVersionSatisfies(inputRange, inputVersion);
+      expect(actual).toBe(expected);
+    }
+  );
+});
+
+describe('convertVersionToSemver', () => {
+  it.each([
+    ['12', '12'],
+    ['12.0', '12.0'],
+    ['12.0.2', '12.0.2'],
+    ['12.0.2.1', '12.0.2+1'],
+    ['12.0.2.1.0', '12.0.2+1.0']
+  ])('%s -> %s', (input: string, expected: string) => {
+    const actual = convertVersionToSemver(input);
     expect(actual).toBe(expected);
+  });
+});
+
+describe('normalizeJavaVersionToSemver', () => {
+  it.each([
+    ['17', '17'],
+    ['17.0.8', '17.0.8'],
+    ['17.0.8+7', '17.0.8+7'],
+    ['11.0.9.1', '11.0.9+1'],
+    ['12.0.2.1.0', '12.0.2+1.0'],
+    ['26.0.2.1+1', '26.0.2+1.1'],
+    ['17.0.8.1+1080.1', '17.0.8+1.1080.1'],
+    ['>=11.0.9.1', '>=11.0.9.1'],
+    ['17.x', '17.x']
+  ])('%s -> %s', (input: string, expected: string) => {
+    expect(normalizeJavaVersionToSemver(input)).toBe(expected);
+  });
+});
+
+describe('getNextPageUrlFromLinkHeader', () => {
+  it.each([
+    [
+      {
+        link: '<https://api.adoptium.net/v3/info/release_versions?page=1&page_size=10>; rel="next"'
+      },
+      'https://api.adoptium.net/v3/info/release_versions?page=1&page_size=10'
+    ],
+    [
+      {
+        Link: '<https://example.com/last?page=5>; rel="last", <https://example.com/next?page=2>; rel="next"'
+      },
+      'https://example.com/next?page=2'
+    ],
+    [
+      {
+        link: '<https://api.adoptium.net/v3/versions?page=3>; type="application/json"; rel="next"'
+      },
+      'https://api.adoptium.net/v3/versions?page=3'
+    ],
+    [{link: '<https://example.com/last?page=5>; rel="last"'}, null],
+    [{link: '<https://example.com/page?p=2>; rel="nextsomething"'}, null],
+    [undefined, null]
+  ])('returns %s -> %s', (headers, expected) => {
+    expect(getNextPageUrlFromLinkHeader(headers)).toBe(expected);
+  });
+});
+
+describe('validatePaginationUrl', () => {
+  it('accepts URL with matching origin', () => {
+    expect(
+      validatePaginationUrl(
+        'https://api.adoptium.net/v3/assets?page=2',
+        'https://api.adoptium.net'
+      )
+    ).toBe(true);
+  });
+
+  it('rejects URL with different host', () => {
+    expect(
+      validatePaginationUrl(
+        'https://evil.example.com/steal?data=1',
+        'https://api.adoptium.net'
+      )
+    ).toBe(false);
+  });
+
+  it('rejects URL with different protocol', () => {
+    expect(
+      validatePaginationUrl(
+        'http://api.adoptium.net/v3/assets?page=2',
+        'https://api.adoptium.net'
+      )
+    ).toBe(false);
+  });
+
+  it('returns false for invalid URL', () => {
+    expect(validatePaginationUrl('not-a-url', 'https://api.adoptium.net')).toBe(
+      false
+    );
+  });
+
+  it('accepts URL with explicit default port', () => {
+    expect(
+      validatePaginationUrl(
+        'https://api.adoptium.net:443/v3/assets?page=2',
+        'https://api.adoptium.net'
+      )
+    ).toBe(true);
+  });
+});
+
+describe('getVersionFromFileContent', () => {
+  describe('.sdkmanrc', () => {
+    it.each([
+      ['java=26-tem', '26', 'temurin'],
+      ['java=11.0.20.1-tem', '11.0.20', 'temurin'],
+      ['java = 11.0.20.1-tem', '11.0.20', 'temurin'],
+      ['java=11.0.20.1-tem # a comment in sdkmanrc', '11.0.20', 'temurin'],
+      ['java=11.0.20.1-tem\n#java=21.0.20.1-tem\n', '11.0.20', 'temurin'], // choose first match
+      ['java=11.0.20.1-tem\njava=21.0.20.1-tem\n', '11.0.20', 'temurin'], // choose first match
+      ['#java=11.0.20.1-tem\njava=21.0.20.1-tem\n', '21.0.20', 'temurin'], // first one is 'commented' in .sdkmanrc
+      ['java=21.0.5-zulu', '21.0.5', 'zulu'],
+      ['java=17.0.13-albba', '17.0.13', 'dragonwell'],
+      ['java=17.0.13-amzn', '17', 'corretto'],
+      ['java=21.0.5-graal', '21.0.5', 'graalvm'],
+      ['java=17.0.9-graalce', '17.0.9', 'graalvm'],
+      ['java=11.0.25-librca', '11.0.25', 'liberica'],
+      ['java=25.0.4+1.1-librca', '25.0.4+1.1', 'liberica'],
+      ['java=25.0.4+1.1-zulu', '25.0.4+1.1', 'zulu'],
+      ['java=11.0.25-ms', '11.0.25', 'microsoft'],
+      ['java=21.0.5-oracle', '21.0.5', 'oracle'],
+      ['java=11.0.25-sapmchn', '11.0.25', 'sapmachine'],
+      ['java=21.0.5-jbr', '21.0.5', 'jetbrains'],
+      ['java=11.0.25-sem', '11.0.25', 'semeru'],
+      ['java=17.0.13-dragonwell', '17.0.13', 'dragonwell'],
+      ['java=21.0.5-kona', '21.0.5', 'kona']
+    ])(
+      'parsing %s should return version %s and distribution %s',
+      (content: string, expectedVersion: string, expectedDist: string) => {
+        const actual = getVersionFromFileContent(
+          content,
+          'openjdk',
+          '.sdkmanrc'
+        );
+        expect(actual?.version).toBe(expectedVersion);
+        expect(actual?.distribution).toBe(expectedDist);
+      }
+    );
+
+    it('should warn and return undefined distribution for unknown identifier', () => {
+      const warnSpy = jest.spyOn(core, 'warning');
+      const actual = getVersionFromFileContent(
+        'java=21.0.5-unknown',
+        'temurin',
+        '.sdkmanrc'
+      );
+      expect(actual?.version).toBe('21.0.5');
+      expect(actual?.distribution).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown SDKMAN distribution identifier')
+      );
+    });
+
+    it('should return version without distribution when no suffix provided', () => {
+      const actual = getVersionFromFileContent(
+        'java=11.0.20',
+        'temurin',
+        '.sdkmanrc'
+      );
+      expect(actual?.version).toBe('11.0.20');
+      expect(actual?.distribution).toBeUndefined();
+    });
+
+    describe('known versions', () => {
+      const csv = fs.readFileSync(
+        path.join(__dirname, 'data/sdkman-java-versions.csv'),
+        'utf8'
+      );
+      const versions = csv.split('\n').map(r => r.split(', '));
+
+      it.each(versions)(
+        'parsing %s should return %s',
+        (sdkmanJavaVersion: string, expected: string) => {
+          const asContent = `java=${sdkmanJavaVersion}`;
+          const actual = getVersionFromFileContent(
+            asContent,
+            'openjdk',
+            '.sdkmanrc'
+          );
+          expect(actual?.version).toBe(expected);
+        }
+      );
+    });
+  });
+
+  describe('.tool-versions', () => {
+    it.each([
+      ['java temurin-17.0.3+7', '17.0.3+7', 'temurin'],
+      ['java temurin-jre-17.0.3+7', '17.0.3+7', 'temurin'],
+      ['java adoptopenjdk-11.0.16+8', '11.0.16+8', 'temurin'],
+      ['java adoptopenjdk-openj9-11.0.16+8', '11.0.16+8', 'temurin'],
+      ['java zulu-11.56.19', '11.56.19', 'zulu'],
+      ['java corretto-17.0.13.11.1', '17', 'corretto'], // corretto -> major only
+      ['java liberica-11.0.15+10', '11.0.15+10', 'liberica'],
+      ['java microsoft-11.0.13.8.1', '11.0.13', 'microsoft'],
+      ['java semeru-openj9-11.0.25+9', '11.0.25+9', 'semeru'],
+      ['java ibm-openj9-11.0.25+9', '11.0.25+9', 'semeru'],
+      ['java dragonwell-17.0.13.0.13+11', '17.0.13', 'dragonwell'],
+      ['java graalvm-22.3.0+java17', '22.3.0+java17', 'graalvm'],
+      ['java graalvm-community-22.3.0', '22.3.0', 'graalvm-community'],
+      ['java oracle-graalvm-21.0.5', '21.0.5', 'graalvm'],
+      ['java oracle-21.0.5', '21.0.5', 'oracle'],
+      ['java sapmachine-21.0.5', '21.0.5', 'sapmachine'],
+      ['java kona-17.0.13', '17.0.13', 'kona'],
+      ['java jetbrains-21.0.5', '21.0.5', 'jetbrains']
+    ])(
+      'parsing %s should return version %s and distribution %s',
+      (content: string, expectedVersion: string, expectedDist: string) => {
+        const actual = getVersionFromFileContent(
+          content,
+          'openjdk',
+          '.tool-versions'
+        );
+        expect(actual?.version).toBe(expectedVersion);
+        expect(actual?.distribution).toBe(expectedDist);
+      }
+    );
+
+    it.each([
+      ['java 17.0.7', '17.0.7'],
+      ['java 17', '17'],
+      ['java 1.8', '8'],
+      ['java 21-ea', '21-ea']
+    ])(
+      'parsing prefix-less %s should return version %s and no distribution',
+      (content: string, expectedVersion: string) => {
+        const actual = getVersionFromFileContent(
+          content,
+          'temurin',
+          '.tool-versions'
+        );
+        expect(actual?.version).toBe(expectedVersion);
+        expect(actual?.distribution).toBeUndefined();
+      }
+    );
+
+    it('should warn and return undefined distribution for unsupported vendor', () => {
+      const warnSpy = jest.spyOn(core, 'warning');
+      const actual = getVersionFromFileContent(
+        'java openjdk-17.0.7',
+        'temurin',
+        '.tool-versions'
+      );
+      expect(actual?.version).toBe('17.0.7');
+      expect(actual?.distribution).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown asdf distribution identifier')
+      );
+    });
+  });
+});
+
+describe('isGhes', () => {
+  const pristineEnv = process.env;
+
+  beforeEach(() => {
+    process.env = {...pristineEnv};
+  });
+
+  afterAll(() => {
+    process.env = pristineEnv;
+  });
+
+  it('returns false when the GITHUB_SERVER_URL environment variable is not defined', async () => {
+    delete process.env['GITHUB_SERVER_URL'];
+    expect(isGhes()).toBeFalsy();
+  });
+
+  it('returns false when the GITHUB_SERVER_URL environment variable is set to github.com', async () => {
+    process.env['GITHUB_SERVER_URL'] = 'https://github.com';
+    expect(isGhes()).toBeFalsy();
+  });
+
+  it('returns false when the GITHUB_SERVER_URL environment variable is set to a GitHub Enterprise Cloud-style URL', async () => {
+    process.env['GITHUB_SERVER_URL'] = 'https://contoso.ghe.com';
+    expect(isGhes()).toBeFalsy();
+  });
+
+  it('returns false when the GITHUB_SERVER_URL environment variable has a .localhost suffix', async () => {
+    process.env['GITHUB_SERVER_URL'] = 'https://mock-github.localhost';
+    expect(isGhes()).toBeFalsy();
+  });
+
+  it('returns true when the GITHUB_SERVER_URL environment variable is set to some other URL', async () => {
+    process.env['GITHUB_SERVER_URL'] = 'https://src.onpremise.fabrikam.com';
+    expect(isGhes()).toBeTruthy();
+  });
+});
+
+describe('getLatestMajorVersion', () => {
+  const makeHttp = (getJson: jest.Mock) =>
+    ({getJson}) as unknown as import('@actions/http-client').HttpClient;
+
+  it('returns most_recent_feature_release from the Adoptium API', async () => {
+    const getJson = jest.fn(async () => ({
+      statusCode: 200,
+      result: {most_recent_feature_release: 25},
+      headers: {}
+    }));
+
+    await expect(getLatestMajorVersion(makeHttp(getJson))).resolves.toBe(25);
+    expect(getJson).toHaveBeenCalledWith(
+      'https://api.adoptium.net/v3/info/available_releases'
+    );
+  });
+
+  it('throws when the response does not contain a usable value', async () => {
+    const getJson = jest.fn(async () => ({
+      statusCode: 200,
+      result: {},
+      headers: {}
+    }));
+
+    await expect(getLatestMajorVersion(makeHttp(getJson))).rejects.toThrow(
+      'Could not determine the latest available Java major version'
+    );
   });
 });

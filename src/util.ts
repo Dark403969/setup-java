@@ -5,14 +5,46 @@ import * as semver from 'semver';
 import * as core from '@actions/core';
 
 import * as tc from '@actions/tool-cache';
+import * as exec from '@actions/exec';
+import * as io from '@actions/io';
+import * as httpm from '@actions/http-client';
+import {randomUUID} from 'crypto';
+import {
+  INPUT_JOB_STATUS,
+  DISTRIBUTIONS_ONLY_MAJOR_VERSION,
+  INPUT_CACHE_JDK
+} from './constants.js';
+import {IncomingHttpHeaders, OutgoingHttpHeaders} from 'http';
+
 export function getTempDir() {
-  let tempDirectory = process.env['RUNNER_TEMP'] || os.tmpdir();
+  const tempDirectory = process.env['RUNNER_TEMP'] || os.tmpdir();
 
   return tempDirectory;
 }
 
-export function getBooleanInput(inputName: string, defaultValue: boolean = false) {
-  return (core.getInput(inputName) || String(defaultValue)).toUpperCase() === 'TRUE';
+export function getBooleanInput(inputName: string, defaultValue = false) {
+  const inputValue = core.getInput(inputName);
+  const normalizedValue = inputValue.trim().toLowerCase();
+
+  if (!normalizedValue) {
+    return defaultValue;
+  }
+  if (normalizedValue === 'true') {
+    return true;
+  }
+  if (normalizedValue === 'false') {
+    return false;
+  }
+
+  throw new Error(
+    `Invalid value '${inputValue}' for boolean input '${inputName}'. Expected 'true' or 'false'.`
+  );
+}
+
+export function isJdkCacheEnabled(cache: string): boolean {
+  return core.getInput(INPUT_CACHE_JDK).trim()
+    ? getBooleanInput(INPUT_CACHE_JDK)
+    : Boolean(cache.trim());
 }
 
 export function getVersionFromToolcachePath(toolPath: string) {
@@ -25,7 +57,11 @@ export function getVersionFromToolcachePath(toolPath: string) {
 
 export async function extractJdkFile(toolPath: string, extension?: string) {
   if (!extension) {
-    extension = toolPath.endsWith('.tar.gz') ? 'tar.gz' : path.extname(toolPath);
+    extension = toolPath.endsWith('.tar.gz')
+      ? 'tar.gz'
+      : toolPath.endsWith('.tar.xz')
+        ? 'tar.xz'
+        : path.extname(toolPath);
     if (extension.startsWith('.')) {
       extension = extension.substring(1);
     }
@@ -33,13 +69,207 @@ export async function extractJdkFile(toolPath: string, extension?: string) {
 
   switch (extension) {
     case 'tar.gz':
+      return await extractTarGz(toolPath);
+    case 'tar.xz':
+      return await tc.extractTar(toolPath, undefined, 'xJ');
     case 'tar':
       return await tc.extractTar(toolPath);
     case 'zip':
-      return await tc.extractZip(toolPath);
+      return await extractZipArchive(toolPath);
     default:
       return await tc.extract7z(toolPath);
   }
+}
+
+async function createExtractFolder(): Promise<string> {
+  const dest = path.join(getTempDir(), randomUUID());
+  await io.mkdirP(dest);
+
+  return dest;
+}
+
+/**
+ * Decompressing a JDK tarball with the default single-threaded gzip is one of the
+ * slowest parts of the install, so hand the decompression to `pigz` when the runner
+ * provides it. Any failure falls back to the stock extraction.
+ */
+async function extractTarGz(toolPath: string): Promise<string> {
+  const pigzPath = await io.which('pigz');
+  // tar splits --use-compress-program on whitespace, so a path containing a
+  // space would be word-split into a bogus command.
+  if (pigzPath && !/\s/.test(pigzPath)) {
+    const dest = await createExtractFolder();
+    try {
+      return await tc.extractTar(toolPath, dest, [
+        '--use-compress-program',
+        `${pigzPath} -d`,
+        '-x'
+      ]);
+    } catch (error) {
+      await io.rmRF(dest);
+      core.debug(
+        `Failed to extract '${toolPath}' with pigz, falling back to gzip: ${getErrorMessage(error)}`
+      );
+    }
+  }
+
+  return await tc.extractTar(toolPath);
+}
+
+/**
+ * `tc.extractZip` shells out to PowerShell's `Expand-Archive` on Windows, which is
+ * several times slower than the bundled bsdtar. Prefer `tar.exe` and fall back to
+ * the stock extraction when it is unavailable or fails.
+ */
+async function extractZipArchive(toolPath: string): Promise<string> {
+  if (process.platform === 'win32') {
+    const systemTar = path.join(
+      process.env['SystemRoot'] || 'C:\\Windows',
+      'System32',
+      'tar.exe'
+    );
+
+    if (fs.existsSync(systemTar)) {
+      const dest = await createExtractFolder();
+      try {
+        await exec.exec(`"${systemTar}"`, ['-xf', toolPath, '-C', dest], {
+          silent: true
+        });
+
+        return dest;
+      } catch (error) {
+        await io.rmRF(dest);
+        core.debug(
+          `Failed to extract '${toolPath}' with tar.exe, falling back to Expand-Archive: ${getErrorMessage(error)}`
+        );
+      }
+    }
+  }
+
+  return await tc.extractZip(toolPath);
+}
+
+/**
+ * Equivalent of `tc.cacheDir`, but moves the extracted JDK into the tool-cache
+ * instead of copying it. `tc.cacheDir` recursively copies the whole tree, which
+ * means a several hundred megabyte JDK is written to disk twice. The extraction
+ * directory and the tool-cache normally live on the same filesystem, so a rename
+ * is effectively free. Anything unexpected (a different filesystem, or a file
+ * handle held open by anti-virus software on Windows) falls back to the copy.
+ */
+export async function cacheJdkDir(
+  sourceDir: string,
+  toolName: string,
+  version: string,
+  architecture: string
+): Promise<string> {
+  const destPath = getToolcacheDestination(toolName, version, architecture);
+
+  if (destPath) {
+    let moved = false;
+    try {
+      // lstat, not stat: renaming a symlinked source would put the link itself
+      // in the tool-cache, leaving a dangling JAVA_HOME once RUNNER_TEMP is
+      // cleaned. tc.cacheDir dereferences it, so let it handle that case.
+      if (fs.lstatSync(sourceDir).isDirectory()) {
+        await io.rmRF(destPath);
+        await io.rmRF(`${destPath}.complete`);
+        await io.mkdirP(path.dirname(destPath));
+        // Renaming is atomic, so a failure here leaves sourceDir untouched and
+        // the copy-based fallback below can still run.
+        fs.renameSync(sourceDir, destPath);
+        moved = true;
+      }
+    } catch (error) {
+      core.debug(
+        `Failed to move '${sourceDir}' into the tool-cache, falling back to a copy: ${getErrorMessage(error)}`
+      );
+    }
+
+    if (moved) {
+      fs.writeFileSync(`${destPath}.complete`, '');
+
+      return destPath;
+    }
+  }
+
+  return await tc.cacheDir(sourceDir, toolName, version, architecture);
+}
+
+export function getJavaVersionFromReleaseFile(javaHome: string): string {
+  const releasePaths = [
+    path.join(javaHome, 'release'),
+    path.join(javaHome, 'Contents', 'Home', 'release')
+  ];
+  const releasePath = releasePaths.find(candidate => fs.existsSync(candidate));
+  if (!releasePath) {
+    throw new Error(
+      `Unable to determine the installed Java version: no release file found under '${javaHome}'.`
+    );
+  }
+
+  const properties = new Map<string, string>();
+  for (const line of fs.readFileSync(releasePath, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^([A-Z0-9_]+)="(.*)"$/);
+    if (match) {
+      properties.set(match[1], match[2]);
+    }
+  }
+
+  const runtimeVersion = properties.get('JAVA_RUNTIME_VERSION');
+  const runtimeMatch = runtimeVersion?.match(
+    /^(\d+(?:\.\d+)*(?:\+\d+(?:\.\d+)*)?)/
+  );
+  if (runtimeMatch) {
+    return normalizeJavaReleaseVersion(runtimeMatch[1]);
+  }
+
+  const javaVersion = properties.get('JAVA_VERSION');
+  if (javaVersion && /^\d+(?:\.\d+)*$/.test(javaVersion)) {
+    return normalizeJavaReleaseVersion(javaVersion);
+  }
+
+  throw new Error(
+    `Unable to determine the installed Java version from '${releasePath}'.`
+  );
+}
+
+function normalizeJavaReleaseVersion(version: string): string {
+  const [numericVersion, buildVersion] = version.split('+', 2);
+  const components = numericVersion.split('.');
+  while (components.length < 3) {
+    components.push('0');
+  }
+
+  const mainVersion = components.slice(0, 3).join('.');
+  const build = [
+    ...components.slice(3),
+    ...(buildVersion ? [buildVersion] : [])
+  ];
+  return build.length > 0 ? `${mainVersion}+${build.join('.')}` : mainVersion;
+}
+
+function getToolcacheDestination(
+  toolName: string,
+  version: string,
+  architecture: string
+): string | null {
+  const toolcacheRoot = process.env['RUNNER_TOOL_CACHE'];
+  if (!toolcacheRoot) {
+    return null;
+  }
+
+  // Mirrors the destination layout used by `tc.cacheDir`.
+  return path.join(
+    toolcacheRoot,
+    toolName,
+    semver.clean(version) || version,
+    architecture || os.arch()
+  );
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function getDownloadArchiveExtension() {
@@ -47,6 +277,14 @@ export function getDownloadArchiveExtension() {
 }
 
 export function isVersionSatisfies(range: string, version: string): boolean {
+  // Some distributions (e.g. JetBrains Runtime) publish 4-segment versions
+  // like '17.0.8.1+1080.1' that semver rejects. If the candidate version
+  // isn't valid semver, it can't match — bail out rather than letting
+  // compareBuild / satisfies throw.
+  if (!semver.valid(version)) {
+    return false;
+  }
+
   if (semver.valid(range)) {
     // if full version with build digit is provided as a range (such as '1.2.3+4')
     // we should check for exact equal via compareBuild
@@ -60,7 +298,11 @@ export function isVersionSatisfies(range: string, version: string): boolean {
   return semver.satisfies(version, range);
 }
 
-export function getToolcachePath(toolName: string, version: string, architecture: string) {
+export function getToolcachePath(
+  toolName: string,
+  version: string,
+  architecture: string
+) {
   const toolcacheRoot = process.env['RUNNER_TOOL_CACHE'] ?? '';
   const fullPath = path.join(toolcacheRoot, toolName, version, architecture);
   if (fs.existsSync(fullPath)) {
@@ -68,4 +310,363 @@ export function getToolcachePath(toolName: string, version: string, architecture
   }
 
   return null;
+}
+
+export function isJobStatusSuccess() {
+  const jobStatus = core.getInput(INPUT_JOB_STATUS);
+
+  return jobStatus === 'success';
+}
+
+export function isGhes(): boolean {
+  const ghUrl = new URL(
+    process.env['GITHUB_SERVER_URL'] || 'https://github.com'
+  );
+
+  const hostname = ghUrl.hostname.trimEnd().toUpperCase();
+  const isGitHubHost = hostname === 'GITHUB.COM';
+  const isGitHubEnterpriseCloudHost = hostname.endsWith('.GHE.COM');
+  const isLocalHost = hostname.endsWith('.LOCALHOST');
+
+  return !isGitHubHost && !isGitHubEnterpriseCloudHost && !isLocalHost;
+}
+
+export interface VersionInfo {
+  version: string;
+  distribution?: string;
+}
+
+export function getVersionFromFileContent(
+  content: string,
+  distributionName: string,
+  versionFile: string
+): VersionInfo | null {
+  let javaVersionRegExp: RegExp;
+  let extractedDistribution: string | undefined;
+
+  function getFileName(versionFile: string) {
+    return path.basename(versionFile);
+  }
+
+  const versionFileName = getFileName(versionFile);
+  if (versionFileName == '.tool-versions') {
+    // Capture an optional asdf-java vendor prefix (e.g. `temurin-`, `corretto-`)
+    // in the `distribution` group so it can be mapped to a setup-java distribution.
+    javaVersionRegExp =
+      /^java\s+(?:(?<distribution>\S*)-)?(?<version>\d+(?:\.\d+)*([+_.-](?:openj9[-._]?\d[\w.-]*|java\d+|jre[-_\w]*|OpenJDK\d+[\w_.-]*|[a-z0-9]+))*)/im;
+  } else if (versionFileName == '.sdkmanrc') {
+    // Match both version and optional distribution identifier
+    javaVersionRegExp =
+      /^java\s*=\s*(?<version>[^-\s]+)(?:-(?<distribution>[a-z0-9]+))?/m;
+  } else {
+    javaVersionRegExp = /(?<version>(?<=(^|\s|-))(\d+\S*))(\s|$)/;
+  }
+
+  const match = content.match(javaVersionRegExp);
+  const capturedVersion = match?.groups?.version
+    ? (match.groups.version as string)
+    : '';
+
+  // Extract distribution from .sdkmanrc file
+  if (versionFileName == '.sdkmanrc' && match?.groups?.distribution) {
+    const sdkmanDist = match.groups.distribution;
+    extractedDistribution = mapSdkmanDistribution(sdkmanDist);
+    core.debug(
+      `Parsed distribution '${extractedDistribution}' from SDKMAN identifier '${sdkmanDist}'`
+    );
+  }
+
+  // Extract distribution from asdf .tool-versions file
+  if (versionFileName == '.tool-versions' && match?.groups?.distribution) {
+    const asdfDist = match.groups.distribution;
+    extractedDistribution = mapAsdfDistribution(asdfDist);
+    if (extractedDistribution) {
+      core.debug(
+        `Parsed distribution '${extractedDistribution}' from asdf identifier '${asdfDist}'`
+      );
+    }
+  }
+
+  core.debug(
+    `Parsed version '${capturedVersion}' from file '${versionFileName}'`
+  );
+  if (!capturedVersion) {
+    return null;
+  }
+
+  const tentativeVersion = avoidOldNotation(capturedVersion);
+  const rawVersion = tentativeVersion.split('-')[0];
+
+  let version = semver.validRange(rawVersion)
+    ? tentativeVersion
+    : semver.coerce(tentativeVersion);
+
+  core.debug(`Range version from file is '${version}'`);
+
+  if (!version) {
+    return null;
+  }
+
+  // Apply DISTRIBUTIONS_ONLY_MAJOR_VERSION logic whenever the effective distribution
+  // (either explicitly provided or extracted from the version file) is in the list.
+  if (
+    DISTRIBUTIONS_ONLY_MAJOR_VERSION.includes(
+      extractedDistribution || distributionName
+    )
+  ) {
+    const coerceVersion = semver.coerce(version) ?? version;
+    version = semver.major(coerceVersion).toString();
+  }
+
+  return {
+    version: version.toString(),
+    distribution: extractedDistribution
+  };
+}
+
+// Map SDKMAN distribution identifiers to setup-java distribution names
+function mapSdkmanDistribution(sdkmanDist: string): string | undefined {
+  const distributionMap: Record<string, string> = {
+    tem: 'temurin',
+    sem: 'semeru',
+    albba: 'dragonwell',
+    zulu: 'zulu',
+    amzn: 'corretto',
+    graal: 'graalvm',
+    graalce: 'graalvm',
+    librca: 'liberica',
+    ms: 'microsoft',
+    oracle: 'oracle',
+    sapmchn: 'sapmachine',
+    jbr: 'jetbrains',
+    dragonwell: 'dragonwell',
+    kona: 'kona'
+  };
+
+  const mapped = distributionMap[sdkmanDist.toLowerCase()];
+  if (!mapped) {
+    core.warning(
+      `Unknown SDKMAN distribution identifier '${sdkmanDist}'. Please specify the distribution explicitly.`
+    );
+  }
+  return mapped;
+}
+
+// Map asdf-java (.tool-versions) vendor identifiers to setup-java distribution names.
+// asdf-java encodes the vendor as a prefix on the version string, e.g.
+// `java temurin-17.0.3+7` or `java semeru-openj9-11.0.25+9`. Packaging variants
+// (`-jre`, `-musl`, `-openj9`, `-crac`, `-javafx`, ...) are collapsed onto the
+// base vendor since setup-java does not distinguish them here.
+function mapAsdfDistribution(asdfDist: string): string | undefined {
+  const normalized = asdfDist.toLowerCase();
+
+  // Multi-segment vendors that map to a distinct setup-java distribution.
+  if (normalized.startsWith('graalvm-community')) {
+    return 'graalvm-community';
+  }
+  if (normalized.startsWith('oracle-graalvm')) {
+    return 'graalvm';
+  }
+
+  const baseVendor = normalized.split('-')[0];
+  const distributionMap: Record<string, string> = {
+    temurin: 'temurin',
+    adoptopenjdk: 'temurin',
+    zulu: 'zulu',
+    corretto: 'corretto',
+    liberica: 'liberica',
+    microsoft: 'microsoft',
+    semeru: 'semeru',
+    ibm: 'semeru',
+    dragonwell: 'dragonwell',
+    graalvm: 'graalvm',
+    oracle: 'oracle',
+    sapmachine: 'sapmachine',
+    kona: 'kona',
+    jetbrains: 'jetbrains'
+  };
+
+  const mapped = distributionMap[baseVendor];
+  if (!mapped) {
+    core.warning(
+      `Unknown asdf distribution identifier '${asdfDist}'. Please specify the distribution explicitly.`
+    );
+  }
+  return mapped;
+}
+
+// By convention, action expects version 8 in the format `8.*` instead of `1.8`
+function avoidOldNotation(content: string): string {
+  return content.startsWith('1.') ? content.substring(2) : content;
+}
+
+export function convertVersionToSemver(version: number[] | string) {
+  // Some distributions may use semver-like notation (12.10.2.1, 12.10.2.1.1)
+  const versionArray = Array.isArray(version) ? version : version.split('.');
+  const mainVersion = versionArray.slice(0, 3).join('.');
+  if (versionArray.length > 3) {
+    return `${mainVersion}+${versionArray.slice(3).join('.')}`;
+  }
+  return mainVersion;
+}
+
+/**
+ * Java versions (JEP 322) can contain more numeric fields than SemVer allows,
+ * e.g. '11.0.9.1' or Temurin respins such as '26.0.2.1+1'. Move the extra
+ * fields into SemVer build metadata ('11.0.9+1', '26.0.2+1.1'). Any other
+ * input (ranges, regular SemVer versions) is returned unchanged.
+ */
+export function normalizeJavaVersionToSemver(version: string): string {
+  const match = /^(\d+(?:\.\d+){3,})(?:\+([0-9A-Za-z.-]+))?$/.exec(version);
+  if (!match) {
+    return version;
+  }
+  const converted = convertVersionToSemver(match[1]);
+  return match[2] ? `${converted}.${match[2]}` : converted;
+}
+
+/**
+ * Builds a validator for the bytes currently served by a URL from the response
+ * headers of a HEAD request. A vendor's `/latest/` URL never changes, so this
+ * is what lets a republished artifact be told apart from the previous one when
+ * no checksum is published alongside it.
+ *
+ * Returns `undefined` when the response carries no usable validator, in which
+ * case the caller must not treat the URL as a stable identity.
+ */
+export function getArtifactFingerprint(
+  headers: IncomingHttpHeaders | undefined
+): string | undefined {
+  const readHeader = (name: string): string | undefined => {
+    const value = headers?.[name];
+    const resolved = Array.isArray(value) ? value[0] : value;
+    return typeof resolved === 'string' && resolved.trim()
+      ? resolved.trim()
+      : undefined;
+  };
+
+  // A strong or weak ETag already identifies a specific representation.
+  const etag = readHeader('etag');
+  if (etag) {
+    return `etag:${etag}`;
+  }
+
+  // Otherwise combine the two validators a static file server reliably sends.
+  // Neither alone is sufficient: `last-modified` has one-second granularity and
+  // `content-length` is unchanged by a same-size rebuild.
+  const lastModified = readHeader('last-modified');
+  const contentLength = readHeader('content-length');
+  if (lastModified && contentLength) {
+    return `mtime:${lastModified};length:${contentLength}`;
+  }
+
+  return undefined;
+}
+
+export function getGitHubToken(): string | undefined {
+  return core.getInput('token') || process.env.GITHUB_TOKEN;
+}
+
+export function getGitHubHttpHeaders(): OutgoingHttpHeaders {
+  const resolvedToken = getGitHubToken();
+  const auth = !resolvedToken ? undefined : `token ${resolvedToken}`;
+
+  const headers: OutgoingHttpHeaders = {
+    accept: 'application/vnd.github.VERSION.raw'
+  };
+
+  if (auth) {
+    headers.authorization = auth;
+  }
+  return headers;
+}
+
+export const MAX_PAGINATION_PAGES = 1000;
+
+export function getNextPageUrlFromLinkHeader(
+  headers?: Record<string, string | string[] | undefined>
+): string | null {
+  if (!headers) {
+    return null;
+  }
+
+  const linkHeader = headers.link ?? headers.Link;
+  if (!linkHeader) {
+    return null;
+  }
+
+  const normalizedLinkHeader = Array.isArray(linkHeader)
+    ? linkHeader.join(',')
+    : linkHeader;
+
+  // Split into individual link-values and find the one with rel="next"
+  // RFC 8288 allows rel to appear anywhere among the parameters
+  const linkValues = normalizedLinkHeader.split(/,(?=\s*<)/);
+  for (const linkValue of linkValues) {
+    const urlMatch = linkValue.match(/<([^>]+)>/);
+    if (!urlMatch) continue;
+
+    const params = linkValue.slice(urlMatch[0].length);
+    // Use word boundary to match "next" as a standalone relation type
+    // RFC 8288 allows space-separated relation types like rel="next prev"
+    if (/;\s*rel="?[^"]*\bnext\b/i.test(params)) {
+      return urlMatch[1];
+    }
+  }
+
+  return null;
+}
+
+export function validatePaginationUrl(
+  url: string,
+  allowedOrigin: string
+): boolean {
+  try {
+    const parsed = new URL(url);
+    const allowed = new URL(allowedOrigin);
+    return parsed.origin === allowed.origin;
+  } catch {
+    return false;
+  }
+}
+
+// Rename archive to add extension because after downloading
+// archive does not contain extension type and it leads to some issues
+// on Windows runners without PowerShell Core.
+//
+// For default PowerShell Windows it should contain extension type to unpack it.
+export function renameWinArchive(javaArchivePath: string): string {
+  const javaArchivePathRenamed = `${javaArchivePath}.zip`;
+  fs.renameSync(javaArchivePath, javaArchivePathRenamed);
+  return javaArchivePathRenamed;
+}
+
+interface IAdoptiumAvailableReleases {
+  most_recent_feature_release: number;
+}
+
+// Resolve the newest available stable/GA feature (major) release.
+//
+// Some distributions (e.g. Oracle, GraalVM) construct their download URLs from a
+// concrete major version and don't expose an endpoint to list every available
+// release, so a bare `latest` alias can't be resolved from their own metadata.
+// The Adoptium (Temurin) API is used as a proxy for "what is the newest GA major
+// version out there", which those distributions typically publish at the same time.
+export async function getLatestMajorVersion(
+  http: httpm.HttpClient
+): Promise<number> {
+  const availableReleasesUrl =
+    'https://api.adoptium.net/v3/info/available_releases';
+
+  const response =
+    await http.getJson<IAdoptiumAvailableReleases>(availableReleasesUrl);
+
+  const mostRecent = response.result?.most_recent_feature_release;
+  if (!mostRecent || Number.isNaN(Number(mostRecent))) {
+    throw new Error(
+      `Could not determine the latest available Java major version from ${availableReleasesUrl}`
+    );
+  }
+
+  return Number(mostRecent);
 }

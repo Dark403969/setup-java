@@ -1,0 +1,167 @@
+import * as core from '@actions/core';
+
+import fs from 'fs';
+import path from 'path';
+
+import {JavaBase} from '../base-installer.js';
+import {
+  JavaDownloadRelease,
+  JavaInstallerOptions,
+  JavaInstallerResults
+} from '../base-models.js';
+import {
+  cacheJdkDir,
+  extractJdkFile,
+  getArtifactFingerprint,
+  getDownloadArchiveExtension,
+  getJavaVersionFromReleaseFile,
+  getLatestMajorVersion,
+  renameWinArchive
+} from '../../util.js';
+import {HttpCodes} from '@actions/http-client';
+import {OsVersions} from './models.js';
+
+const ORACLE_DL_BASE = 'https://download.oracle.com/java';
+
+export class OracleDistribution extends JavaBase {
+  constructor(installerOptions: JavaInstallerOptions) {
+    super('Oracle', installerOptions);
+  }
+
+  protected async downloadTool(
+    javaRelease: JavaDownloadRelease
+  ): Promise<JavaInstallerResults> {
+    core.info(
+      `Downloading Java ${javaRelease.version} (${this.distribution}) from ${javaRelease.url} ...`
+    );
+    let javaArchivePath = await this.downloadAndVerify(javaRelease);
+
+    core.info(`Extracting Java archive...`);
+    const extension = getDownloadArchiveExtension();
+    if (process.platform === 'win32') {
+      javaArchivePath = renameWinArchive(javaArchivePath);
+    }
+    const extractedJavaPath = await extractJdkFile(javaArchivePath, extension);
+
+    const archiveName = fs.readdirSync(extractedJavaPath)[0];
+    const archivePath = path.join(extractedJavaPath, archiveName);
+    const installedVersion = javaRelease.floating
+      ? getJavaVersionFromReleaseFile(archivePath)
+      : javaRelease.version;
+    const version = this.getToolcacheVersionName(installedVersion);
+
+    const javaPath = await cacheJdkDir(
+      archivePath,
+      this.toolcacheFolderName,
+      version,
+      this.architecture
+    );
+
+    return {version: installedVersion, path: javaPath};
+  }
+
+  protected requiresRemoteResolution(): boolean {
+    return this.stable && !this.version.includes('.');
+  }
+
+  protected async findPackageForDownload(
+    range: string
+  ): Promise<JavaDownloadRelease> {
+    const arch = this.distributionArchitecture();
+    if (arch !== 'x64' && arch !== 'aarch64') {
+      throw new Error(`Unsupported architecture: ${this.architecture}`);
+    }
+
+    if (!this.stable) {
+      throw new Error('Early access versions are not supported');
+    }
+
+    if (this.packageType !== 'jdk') {
+      throw new Error('Oracle JDK provides only the `jdk` package type');
+    }
+
+    const platform = this.getPlatform();
+    const extension = getDownloadArchiveExtension();
+
+    // The `latest` alias is normalized to the SemVer wildcard. Oracle builds its
+    // download URLs from a concrete major and has no endpoint to list releases,
+    // so resolve the newest available GA major from the Adoptium API and use it.
+    if (this.latest) {
+      const latestMajor = await getLatestMajorVersion(this.http);
+      range = latestMajor.toString();
+    }
+
+    const isOnlyMajorProvided = !range.includes('.');
+    const major = isOnlyMajorProvided ? range : range.split('.')[0];
+
+    const possibleUrls: string[] = [];
+
+    /**
+     * NOTE
+     * If only major version was provided we will check it under /latest first
+     * in order to retrieve the latest possible version if possible,
+     * otherwise we will fall back to /archive where we are guaranteed to
+     * find any version if it exists
+     */
+    if (isOnlyMajorProvided) {
+      possibleUrls.push(
+        `${ORACLE_DL_BASE}/${major}/latest/jdk-${major}_${platform}-${arch}_bin.${extension}`
+      );
+    }
+    const floatingUrl = isOnlyMajorProvided ? possibleUrls[0] : undefined;
+
+    possibleUrls.push(
+      `${ORACLE_DL_BASE}/${major}/archive/jdk-${range}_${platform}-${arch}_bin.${extension}`
+    );
+
+    if (parseInt(major) < 17) {
+      throw new Error('Oracle JDK is only supported for JDK 17 and later');
+    }
+
+    for (const url of possibleUrls) {
+      const response = await this.http.head(url);
+
+      if (response.message.statusCode === HttpCodes.OK) {
+        const floating = url === floatingUrl;
+        return {
+          url,
+          version: range,
+          checksum: await this.fetchChecksum(`${url}.sha256`, 'sha256'),
+          floating,
+          fingerprint: floating
+            ? getArtifactFingerprint(response.message.headers)
+            : undefined
+        };
+      }
+
+      if (response.message.statusCode !== HttpCodes.NotFound) {
+        throw new Error(
+          `Http request for Oracle JDK failed with status code: ${response.message.statusCode}`
+        );
+      }
+    }
+
+    if (this.latest) {
+      const error = this.createVersionNotFoundError(range);
+      error.message += `\nThe latest Java major version (${range}) is not yet available for the Oracle JDK distribution. Please specify a concrete version instead of 'latest'.`;
+      throw error;
+    }
+
+    throw this.createVersionNotFoundError(range);
+  }
+
+  public getPlatform(platform: NodeJS.Platform = process.platform): OsVersions {
+    switch (platform) {
+      case 'darwin':
+        return 'macos';
+      case 'win32':
+        return 'windows';
+      case 'linux':
+        return 'linux';
+      default:
+        throw new Error(
+          `Platform '${platform}' is not supported. Supported platforms: 'linux', 'macos', 'windows'`
+        );
+    }
+  }
+}

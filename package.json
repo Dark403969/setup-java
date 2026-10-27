@@ -1,16 +1,34 @@
 {
   "name": "setup-java",
-  "version": "2.0.0",
+  "version": "6.0.0",
+  "type": "module",
   "private": true,
   "description": "setup java action",
   "main": "dist/setup/index.js",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
-    "build": "ncc build -o dist/setup src/setup-java.ts && ncc build -o dist/cleanup src/cleanup-java.ts",
-    "format": "prettier --write \"{,!(node_modules)/**/}*.ts\"",
-    "format-check": "prettier --check \"{,!(node_modules)/**/}*.ts\"",
+    "build": "node scripts/patch-is-unsafe.mjs && ncc build -o dist/setup src/setup-java.ts && ncc build -o dist/cleanup src/cleanup-java.ts",
+    "format": "prettier --no-error-on-unmatched-pattern --write \"**/*.{ts,yml,yaml}\"",
+    "format-check": "prettier --no-error-on-unmatched-pattern --check \"**/*.{ts,yml,yaml}\"",
+    "lint": "eslint \"**/*.ts\"",
+    "lint:fix": "eslint \"**/*.ts\" --fix",
+    "check": "npm run format-check && npm run lint && npm run build && npm test",
+    "fix": "npm run format && npm run lint:fix && npm run build",
+    "prepare": "husky install",
     "prerelease": "npm run-script build",
-    "release": "git add -f dist/setup/index.js dist/cleanup/index.js",
-    "test": "jest"
+    "release": "git add -f dist/setup/*.js dist/setup/package.json dist/cleanup/*.js",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand --coverage"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "prettier --no-error-on-unmatched-pattern --write",
+      "eslint --fix"
+    ],
+    "*.{yml,yaml}": [
+      "prettier --no-error-on-unmatched-pattern --write"
+    ]
   },
   "repository": {
     "type": "git",
@@ -24,29 +42,45 @@
   "author": "GitHub",
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^1.2.6",
-    "@actions/exec": "^1.0.4",
-    "@actions/http-client": "^1.0.9",
-    "@actions/io": "^1.0.2",
-    "@actions/tool-cache": "^1.6.1",
-    "semver": "^7.3.4",
-    "xmlbuilder2": "^2.4.0"
+    "@actions/cache": "^6.2.0",
+    "@actions/core": "^3.0.1",
+    "@actions/exec": "^3.0.0",
+    "@actions/glob": "^0.7.0",
+    "@actions/http-client": "^4.0.1",
+    "@actions/io": "^3.0.2",
+    "@actions/tool-cache": "^4.0.0",
+    "fast-xml-parser": "^5.11.1",
+    "semver": "^7.8.5"
   },
   "devDependencies": {
-    "@types/jest": "^26.0.20",
-    "@types/node": "^12.19.13",
-    "@types/semver": "^7.3.4",
-    "@zeit/ncc": "^0.20.5",
-    "jest": "^26.6.3",
-    "jest-circus": "^26.6.3",
-    "prettier": "^1.19.1",
-    "ts-jest": "^26.5.3",
-    "typescript": "^4.2.3"
+    "@eslint/js": "^10.0.1",
+    "@jest/globals": "^30.5.2",
+    "@types/node": "^26.6.2",
+    "@types/semver": "^7.8.0",
+    "@typescript-eslint/eslint-plugin": "^8.70.1",
+    "@typescript-eslint/parser": "^8.65.0",
+    "@vercel/ncc": "^0.45.0",
+    "eslint": "^10.11.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-jest": "^29.16.6",
+    "eslint-plugin-n": "^18.3.0",
+    "globals": "^17.12.0",
+    "husky": "^9.1.7",
+    "jest": "^30.5.2",
+    "lint-staged": "^17.5.1",
+    "prettier": "^3.9.9",
+    "ts-jest": "^29.4.13",
+    "typescript": "^6.0.3"
   },
-  "husky": {
-    "skipCI": true,
-    "hooks": {
-      "pre-commit": "npm run build && npm run format"
-    }
+  "bugs": {
+    "url": "https://github.com/actions/setup-java/issues"
+  },
+  "homepage": "https://github.com/actions/setup-java#readme",
+  "overrides": {
+    "@actions/cache": {
+      "@actions/glob": "0.7.0"
+    },
+    "glob": "^11.1.0",
+    "test-exclude": "^7.0.2"
   }
 }

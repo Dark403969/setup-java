@@ -1,0 +1,512 @@
+export const id = 81;
+export const ids = [81];
+export const modules = {
+
+/***/ 9081:
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   addMavenServerRepositoryOrigins: () => (/* binding */ addMavenServerRepositoryOrigins),
+/* harmony export */   configureAuthentication: () => (/* binding */ configureAuthentication),
+/* harmony export */   createAuthenticationSettings: () => (/* binding */ createAuthenticationSettings),
+/* harmony export */   generate: () => (/* binding */ generate),
+/* harmony export */   getInputWithDeprecatedAlias: () => (/* binding */ getInputWithDeprecatedAlias),
+/* harmony export */   getMavenRepositorySettings: () => (/* binding */ getMavenRepositorySettings),
+/* harmony export */   getMavenServerSettings: () => (/* binding */ getMavenServerSettings),
+/* harmony export */   parseMavenRepositories: () => (/* binding */ parseMavenRepositories),
+/* harmony export */   parseMavenServerCredentials: () => (/* binding */ parseMavenServerCredentials)
+/* harmony export */ });
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(6928);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _actions_core__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(3838);
+/* harmony import */ var _actions_io__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(8701);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(9896);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(857);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(os__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _constants_js__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(7242);
+/* harmony import */ var _gpg_js__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(8343);
+/* harmony import */ var _util_js__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(4527);
+/* harmony import */ var _xml_js__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(22);
+
+
+
+
+
+
+
+
+
+const MAVEN_REPOSITORY_ORIGIN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#@]+\/?$/;
+async function configureAuthentication() {
+    const servers = getMavenServerSettings();
+    const repositorySettings = getMavenRepositorySettings();
+    const settingsDirectory = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getInput */ .V4(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SETTINGS_PATH */ .Xh) ||
+        path__WEBPACK_IMPORTED_MODULE_0__.join(os__WEBPACK_IMPORTED_MODULE_4__.homedir(), _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .M2_DIR */ .iT);
+    const overwriteSettings = (0,_util_js__WEBPACK_IMPORTED_MODULE_6__/* .getBooleanInput */ .Vt)(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_OVERWRITE_SETTINGS */ .TS, true);
+    const gpgPrivateKey = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getInput */ .V4(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_GPG_PRIVATE_KEY */ .wz) ||
+        _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_DEFAULT_GPG_PRIVATE_KEY */ .OD;
+    const gpgPassphraseEnvVar = getInputWithDeprecatedAlias(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_GPG_PASSPHRASE_ENV_VAR */ .db, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_GPG_PASSPHRASE_DEPRECATED */ .TY, gpgPrivateKey ? _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_DEFAULT_GPG_PASSPHRASE */ .RX : undefined);
+    if (gpgPrivateKey) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .setSecret */ .Pq(gpgPrivateKey);
+    }
+    await createAuthenticationSettings(servers, settingsDirectory, overwriteSettings, gpgPassphraseEnvVar, repositorySettings);
+    if (gpgPrivateKey) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .info */ .pq('Importing private gpg key');
+        const gpgHome = await _gpg_js__WEBPACK_IMPORTED_MODULE_5__/* .importKey */ .Fh(gpgPrivateKey);
+        try {
+            _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .saveState */ .LZ(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .STATE_GPG_HOME */ .Fi, gpgHome);
+            _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .exportVariable */ .dN('GNUPGHOME', _gpg_js__WEBPACK_IMPORTED_MODULE_5__/* .toGpgPath */ .nY(gpgHome));
+        }
+        catch (error) {
+            await _gpg_js__WEBPACK_IMPORTED_MODULE_5__/* .removeGpgHome */ .mS(gpgHome);
+            throw error;
+        }
+    }
+}
+function getInputWithDeprecatedAlias(inputName, deprecatedInputName, defaultValue) {
+    const value = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getInput */ .V4(inputName);
+    const deprecatedValue = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getInput */ .V4(deprecatedInputName);
+    if (deprecatedValue) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .warning */ .$e(`The '${deprecatedInputName}' input is deprecated and may be removed in a future release. Please use '${inputName}' instead.`);
+    }
+    return value || deprecatedValue || defaultValue || '';
+}
+// only exported for testing purposes
+function getMavenServerSettings() {
+    const entries = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getMultilineInput */ .q3(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_SERVER_CREDENTIALS */ .MM);
+    const servers = entries.some(entry => entry.trim())
+        ? parseMavenServerCredentials(entries)
+        : [
+            {
+                id: _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getInput */ .V4(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SERVER_ID */ .fd),
+                usernameEnvVar: getInputWithDeprecatedAlias(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SERVER_USERNAME_ENV_VAR */ .sc, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SERVER_USERNAME_DEPRECATED */ .sp, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_DEFAULT_SERVER_USERNAME */ .Wj),
+                passwordEnvVar: getInputWithDeprecatedAlias(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SERVER_PASSWORD_ENV_VAR */ .r4, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_SERVER_PASSWORD_DEPRECATED */ .Vt, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_DEFAULT_SERVER_PASSWORD */ .xp)
+            }
+        ];
+    return addMavenServerRepositoryOrigins(servers, _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getMultilineInput */ .q3(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_SERVER_REPOSITORY_ORIGINS */ .Pt));
+}
+// only exported for testing purposes
+function parseMavenServerCredentials(entries) {
+    const servers = [];
+    const serverIds = new Set();
+    entries.forEach((entry, index) => {
+        if (!entry.trim()) {
+            return;
+        }
+        const fields = entry.split(':');
+        if (fields.length !== 3) {
+            throw new Error(`Invalid mvn-server-credentials entry at line ${index + 1}. Expected format: server-id:USERNAME_ENV:PASSWORD_ENV`);
+        }
+        const [id, usernameEnvVar, passwordEnvVar] = fields.map(field => field.trim());
+        if (!id || !usernameEnvVar || !passwordEnvVar) {
+            throw new Error(`Invalid mvn-server-credentials entry at line ${index + 1}. server-id, username environment variable, and password environment variable are required`);
+        }
+        if (serverIds.has(id)) {
+            throw new Error(`Duplicate server-id '${id}' in mvn-server-credentials input`);
+        }
+        serverIds.add(id);
+        servers.push({ id, usernameEnvVar, passwordEnvVar });
+    });
+    return servers;
+}
+// only exported for testing purposes
+function addMavenServerRepositoryOrigins(servers, entries) {
+    const serverIds = new Set(servers.map(server => server.id));
+    const originsByServer = new Map();
+    entries.forEach((entry, index) => {
+        if (!entry.trim()) {
+            return;
+        }
+        const separator = entry.indexOf(':');
+        if (separator <= 0 || separator === entry.length - 1) {
+            throw new Error(`Invalid mvn-server-repository-origins entry at line ${index + 1}. Expected format: server-id:repository-origin`);
+        }
+        const id = entry.slice(0, separator).trim();
+        const value = entry.slice(separator + 1).trim();
+        if (!id || !value) {
+            throw new Error(`Invalid mvn-server-repository-origins entry at line ${index + 1}. Server ID and repository origin are required`);
+        }
+        if (!serverIds.has(id)) {
+            throw new Error(`Unknown server-id '${id}' in mvn-server-repository-origins at line ${index + 1}`);
+        }
+        let url;
+        try {
+            if (!MAVEN_REPOSITORY_ORIGIN.test(value)) {
+                throw new Error();
+            }
+            url = new URL(value);
+        }
+        catch {
+            throw new Error(`Invalid repository origin '${value}' in mvn-server-repository-origins at line ${index + 1}`);
+        }
+        if (!url.host ||
+            url.username ||
+            url.password ||
+            (url.pathname !== '' && url.pathname !== '/') ||
+            url.search ||
+            url.hash) {
+            throw new Error(`Invalid repository origin '${value}' in mvn-server-repository-origins at line ${index + 1}`);
+        }
+        const explicitPort = /:(\d+)\/?$/.exec(value)?.[1];
+        const port = explicitPort ? Number.parseInt(explicitPort, 10) : undefined;
+        const includePort = port !== undefined &&
+            !((url.protocol === 'http:' && port === 80) ||
+                (url.protocol === 'https:' && port === 443));
+        const origin = `${url.protocol}//${url.hostname}${includePort ? `:${port}` : ''}`;
+        const origins = originsByServer.get(id) || [];
+        if (!origins.includes(origin)) {
+            origins.push(origin);
+            originsByServer.set(id, origins);
+        }
+    });
+    return servers.map(server => {
+        const repositoryOrigins = originsByServer.get(server.id);
+        return repositoryOrigins ? { ...server, repositoryOrigins } : server;
+    });
+}
+// only exported for testing purposes
+function getMavenRepositorySettings() {
+    const entries = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getMultilineInput */ .q3(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_REPOSITORIES */ .W2);
+    const pluginEntries = _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .getMultilineInput */ .q3(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_PLUGIN_REPOSITORIES */ .gR);
+    if (!entries.some(entry => entry.trim()) &&
+        !pluginEntries.some(entry => entry.trim())) {
+        return undefined;
+    }
+    const includeCentral = (0,_util_js__WEBPACK_IMPORTED_MODULE_6__/* .getBooleanInput */ .Vt)(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_REPOSITORIES_INCLUDE_CENTRAL */ .H5, true);
+    return {
+        repositories: parseMavenRepositories(entries, includeCentral),
+        pluginRepositories: parseMavenRepositories(pluginEntries, includeCentral, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_PLUGIN_REPOSITORIES */ .gR),
+        includeCentral,
+        prioritizeCentral: (0,_util_js__WEBPACK_IMPORTED_MODULE_6__/* .getBooleanInput */ .Vt)(_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_REPOSITORIES_PRIORITIZE_CENTRAL */ .OT, true)
+    };
+}
+// only exported for testing purposes
+function parseMavenRepositories(entries, includeCentral, inputName = _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_REPOSITORIES */ .W2) {
+    const repositories = [];
+    const repositoryIds = new Set();
+    entries.forEach((entry, index) => {
+        if (!entry.trim()) {
+            return;
+        }
+        const firstSeparator = entry.indexOf(':');
+        const lastSeparator = entry.lastIndexOf(':');
+        if (firstSeparator <= 0 || lastSeparator <= firstSeparator) {
+            throw new Error(`Invalid ${inputName} entry at line ${index + 1}. Expected format: repository-id:repository-url:snapshots-enabled`);
+        }
+        const id = entry.slice(0, firstSeparator).trim();
+        const url = entry.slice(firstSeparator + 1, lastSeparator).trim();
+        const snapshotsValue = entry
+            .slice(lastSeparator + 1)
+            .trim()
+            .toLowerCase();
+        if (!id || !url || !snapshotsValue) {
+            throw new Error(`Invalid ${inputName} entry at line ${index + 1}. repository-id, repository URL, and snapshots-enabled are required`);
+        }
+        if (snapshotsValue !== 'true' && snapshotsValue !== 'false') {
+            throw new Error(`Invalid snapshots-enabled value '${snapshotsValue}' in ${inputName} entry at line ${index + 1}. Expected true or false`);
+        }
+        if (repositoryIds.has(id)) {
+            throw new Error(`Duplicate repository-id '${id}' in ${inputName} input`);
+        }
+        if (includeCentral && id === _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_CENTRAL_REPOSITORY_ID */ .xg) {
+            throw new Error(`Repository-id '${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_CENTRAL_REPOSITORY_ID */ .xg}' is reserved when ${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .INPUT_MVN_REPOSITORIES_INCLUDE_CENTRAL */ .H5} is enabled`);
+        }
+        repositoryIds.add(id);
+        repositories.push({
+            id,
+            url,
+            snapshotsEnabled: snapshotsValue === 'true'
+        });
+    });
+    return repositories;
+}
+function generateRepositorySection(customRepositories, settings, element) {
+    if (!customRepositories.length && settings.includeCentral) {
+        return [];
+    }
+    const centralRepository = {
+        id: _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_CENTRAL_REPOSITORY_ID */ .xg,
+        url: _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_CENTRAL_REPOSITORY_URL */ .jv,
+        snapshotsEnabled: false
+    };
+    const customCentralConfigured = customRepositories.some(repository => repository.id === _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_CENTRAL_REPOSITORY_ID */ .xg);
+    const repositories = settings.includeCentral
+        ? settings.prioritizeCentral
+            ? [centralRepository, ...customRepositories]
+            : [...customRepositories, centralRepository]
+        : customCentralConfigured
+            ? customRepositories
+            : [...customRepositories, { ...centralRepository, releasesEnabled: false }];
+    const container = element === 'repository' ? 'repositories' : 'pluginRepositories';
+    const lines = [`      <${container}>`];
+    for (const repository of repositories) {
+        lines.push(`        <${element}>`, `          <id>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(repository.id)}</id>`, `          <url>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(repository.url)}</url>`, ...(repository.releasesEnabled === undefined
+            ? []
+            : [
+                '          <releases>',
+                `            <enabled>${repository.releasesEnabled}</enabled>`,
+                '          </releases>'
+            ]), '          <snapshots>', `            <enabled>${repository.snapshotsEnabled}</enabled>`, '          </snapshots>', `        </${element}>`);
+    }
+    lines.push(`      </${container}>`);
+    return lines;
+}
+async function createAuthenticationSettings(servers, settingsDirectory, overwriteSettings, gpgPassphraseEnvVar = undefined, repositorySettings = undefined) {
+    _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .info */ .pq(`Creating ${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MVN_SETTINGS_FILE */ .vO} with server-id: ${servers.map(server => server.id).join(', ')}`);
+    // when an alternate m2 location is specified use only that location (no .m2 directory)
+    // otherwise use the home/.m2/ path
+    await _actions_io__WEBPACK_IMPORTED_MODULE_2__/* .mkdirP */ .U$(settingsDirectory);
+    await write(settingsDirectory, generate(servers, gpgPassphraseEnvVar, repositorySettings), overwriteSettings);
+}
+// only exported for testing purposes
+function generate(servers, gpgPassphraseEnvVar, repositorySettings) {
+    // The maven-gpg-plugin reads the passphrase from the environment variable
+    // named by the `gpg.passphraseEnvName` property (default MAVEN_GPG_PASSPHRASE).
+    // Only configure it when the requested env var name differs from that default;
+    // otherwise the plugin already reads the right variable and no extra settings
+    // are needed. Writing `gpg.passphrase` to settings.xml is deprecated and fails
+    // when the plugin's `bestPractices` mode is enabled.
+    const includeGpgPassphraseProfile = gpgPassphraseEnvVar &&
+        gpgPassphraseEnvVar !== _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_GPG_PASSPHRASE_DEFAULT_ENV */ .ko;
+    const lines = [
+        '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"',
+        '  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
+        '  xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">',
+        '  <interactiveMode>false</interactiveMode>',
+        '  <servers>'
+    ];
+    for (const server of servers) {
+        lines.push('    <server>', `      <id>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(server.id)}</id>`, `      <username>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(`\${env.${server.usernameEnvVar}}`)}</username>`, `      <password>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(`\${env.${server.passwordEnvVar}}`)}</password>`);
+        if (server.repositoryOrigins) {
+            lines.push('      <repositoryOrigins>');
+            for (const origin of server.repositoryOrigins) {
+                lines.push(`        <repositoryOrigin>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(origin)}</repositoryOrigin>`);
+            }
+            lines.push('      </repositoryOrigins>');
+        }
+        lines.push('    </server>');
+    }
+    lines.push('  </servers>');
+    if (repositorySettings || includeGpgPassphraseProfile) {
+        lines.push('  <profiles>');
+        if (repositorySettings) {
+            lines.push('    <profile>', `      <id>${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_REPOSITORIES_PROFILE_ID */ .hq}</id>`, ...generateRepositorySection(repositorySettings.repositories, repositorySettings, 'repository'), ...generateRepositorySection(repositorySettings.pluginRepositories ?? [], repositorySettings, 'pluginRepository'), '    </profile>');
+        }
+        if (includeGpgPassphraseProfile) {
+            lines.push('    <profile>', `      <id>${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .GPG_PASSPHRASE_PROFILE_ID */ .K$}</id>`, '      <properties>', `        <gpg.passphraseEnvName>${(0,_xml_js__WEBPACK_IMPORTED_MODULE_8__/* .escapeXmlText */ .I)(gpgPassphraseEnvVar)}</gpg.passphraseEnvName>`, '      </properties>', '    </profile>');
+        }
+        lines.push('  </profiles>', '  <activeProfiles>');
+        if (repositorySettings) {
+            lines.push(`    <activeProfile>${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MAVEN_REPOSITORIES_PROFILE_ID */ .hq}</activeProfile>`);
+        }
+        if (includeGpgPassphraseProfile) {
+            lines.push(`    <activeProfile>${_constants_js__WEBPACK_IMPORTED_MODULE_7__/* .GPG_PASSPHRASE_PROFILE_ID */ .K$}</activeProfile>`);
+        }
+        lines.push('  </activeProfiles>');
+    }
+    lines.push('</settings>');
+    return lines.join('\n');
+}
+async function write(directory, settings, overwriteSettings) {
+    const location = path__WEBPACK_IMPORTED_MODULE_0__.join(directory, _constants_js__WEBPACK_IMPORTED_MODULE_7__/* .MVN_SETTINGS_FILE */ .vO);
+    const settingsExists = fs__WEBPACK_IMPORTED_MODULE_3__.existsSync(location);
+    if (settingsExists && overwriteSettings) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .info */ .pq(`Overwriting existing file ${location}`);
+    }
+    else if (!settingsExists) {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .info */ .pq(`Writing to ${location}`);
+    }
+    else {
+        _actions_core__WEBPACK_IMPORTED_MODULE_1__/* .info */ .pq(`Skipping generation ${location} because file already exists and overwriting is not required`);
+        return;
+    }
+    return fs__WEBPACK_IMPORTED_MODULE_3__.writeFileSync(location, settings, {
+        encoding: 'utf-8',
+        flag: 'w'
+    });
+}
+
+
+/***/ }),
+
+/***/ 8343:
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   Fh: () => (/* binding */ importKey),
+/* harmony export */   Yi: () => (/* binding */ verifyPackageSignature),
+/* harmony export */   mS: () => (/* binding */ removeGpgHome),
+/* harmony export */   nY: () => (/* binding */ toGpgPath),
+/* harmony export */   o6: () => (/* binding */ isGpgAvailable)
+/* harmony export */ });
+/* unused harmony export GPG_HOME_PREFIX */
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(9896);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(6928);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(6982);
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _actions_io__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(8701);
+/* harmony import */ var _actions_exec__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(5260);
+/* harmony import */ var _actions_tool_cache__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(9805);
+/* harmony import */ var _util_js__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(4527);
+
+
+
+
+
+
+
+const GPG_HOME_PREFIX = 'setup-java-gpg-';
+const VERIFY_GPG_HOME_PREFIX = 'verify-signature-gpg-home-';
+async function isGpgAvailable() {
+    return Boolean(await _actions_io__WEBPACK_IMPORTED_MODULE_3__/* .which */ .K7('gpg', false));
+}
+// Convert a Windows path (D:\a\_temp\...) to a POSIX path (/d/a/_temp/...).
+// The Git-bundled GPG on Windows (MSYS2-based) uses POSIX path conventions
+// internally. Passing Windows paths with backslashes can cause fatal GPG errors
+// (exit code 2), so all paths passed to GPG must be in POSIX format on Windows.
+function toGpgPath(p) {
+    if (process.platform !== 'win32')
+        return p;
+    return p
+        .replace(/\\/g, '/')
+        .replace(/^([A-Za-z]):\//, (_, drive) => `/${drive.toLowerCase()}/`);
+}
+function createGpgHome(prefix, tempDir = _util_js__WEBPACK_IMPORTED_MODULE_6__/* .getTempDir */ .G4()) {
+    const gpgHome = fs__WEBPACK_IMPORTED_MODULE_0__.mkdtempSync(path__WEBPACK_IMPORTED_MODULE_1__.join(tempDir, prefix));
+    if (process.platform !== 'win32') {
+        fs__WEBPACK_IMPORTED_MODULE_0__.chmodSync(gpgHome, 0o700);
+    }
+    return gpgHome;
+}
+async function importKey(privateKey) {
+    const gpgHome = createGpgHome(GPG_HOME_PREFIX);
+    const privateKeyFile = path__WEBPACK_IMPORTED_MODULE_1__.join(gpgHome, `private-key-${(0,crypto__WEBPACK_IMPORTED_MODULE_2__.randomUUID)()}.asc`);
+    try {
+        fs__WEBPACK_IMPORTED_MODULE_0__.writeFileSync(privateKeyFile, privateKey, {
+            encoding: 'utf-8',
+            flag: 'wx',
+            mode: 0o600
+        });
+        try {
+            await _actions_exec__WEBPACK_IMPORTED_MODULE_4__/* .exec */ .m('gpg', [
+                '--homedir',
+                toGpgPath(gpgHome),
+                '--batch',
+                '--import',
+                toGpgPath(privateKeyFile)
+            ], { silent: true });
+        }
+        finally {
+            fs__WEBPACK_IMPORTED_MODULE_0__.rmSync(privateKeyFile, { force: true });
+        }
+        return gpgHome;
+    }
+    catch (error) {
+        await removeGpgHome(gpgHome);
+        throw error;
+    }
+}
+async function removeGpgHome(gpgHome) {
+    if (!gpgHome) {
+        return;
+    }
+    const resolvedGpgHome = path__WEBPACK_IMPORTED_MODULE_1__.resolve(gpgHome);
+    const resolvedTempDir = path__WEBPACK_IMPORTED_MODULE_1__.resolve(_util_js__WEBPACK_IMPORTED_MODULE_6__/* .getTempDir */ .G4());
+    if (path__WEBPACK_IMPORTED_MODULE_1__.dirname(resolvedGpgHome) !== resolvedTempDir ||
+        !path__WEBPACK_IMPORTED_MODULE_1__.basename(resolvedGpgHome).startsWith(GPG_HOME_PREFIX)) {
+        throw new Error(`Refusing to remove unexpected GPG home: ${gpgHome}`);
+    }
+    if (!fs__WEBPACK_IMPORTED_MODULE_0__.existsSync(resolvedGpgHome)) {
+        return;
+    }
+    await stopGpgAgent(resolvedGpgHome);
+    await _actions_io__WEBPACK_IMPORTED_MODULE_3__/* .rmRF */ .Yz(resolvedGpgHome);
+}
+async function stopGpgAgent(gpgHome) {
+    try {
+        await _actions_exec__WEBPACK_IMPORTED_MODULE_4__/* .exec */ .m('gpgconf', ['--homedir', toGpgPath(gpgHome), '--kill', 'gpg-agent'], { silent: true, ignoreReturnCode: true });
+    }
+    catch {
+        // gpgconf may be unavailable, but directory removal must still be attempted.
+    }
+}
+async function verifyPackageSignature(archivePath, signatureUrl, publicKeyContent) {
+    const signaturePath = await _actions_tool_cache__WEBPACK_IMPORTED_MODULE_5__/* .downloadTool */ .bq(signatureUrl);
+    let gpgHome;
+    try {
+        // Both RUNNER_TEMP and TMPDIR can exceed macOS's 104-byte agent socket limit.
+        const tempDir = process.platform === 'darwin' ? '/tmp' : _util_js__WEBPACK_IMPORTED_MODULE_6__/* .getTempDir */ .G4();
+        gpgHome = createGpgHome(VERIFY_GPG_HOME_PREFIX, tempDir);
+    }
+    catch (error) {
+        try {
+            await _actions_io__WEBPACK_IMPORTED_MODULE_3__/* .rmRF */ .Yz(signaturePath);
+        }
+        catch {
+            // ignore cleanup failures
+        }
+        throw new Error(`Failed to create temporary GPG home directory for signature verification: ${error.message}`, { cause: error });
+    }
+    try {
+        const publicKeys = Array.isArray(publicKeyContent)
+            ? publicKeyContent
+            : [publicKeyContent];
+        const publicKeyFiles = publicKeys.map((publicKey, index) => {
+            const publicKeyFile = path__WEBPACK_IMPORTED_MODULE_1__.join(gpgHome, `public-key-${index}.asc`);
+            fs__WEBPACK_IMPORTED_MODULE_0__.writeFileSync(publicKeyFile, publicKey, { encoding: 'utf-8' });
+            return toGpgPath(publicKeyFile);
+        });
+        const options = { silent: true };
+        await _actions_exec__WEBPACK_IMPORTED_MODULE_4__/* .exec */ .m('gpg', [
+            '--homedir',
+            toGpgPath(gpgHome),
+            '--batch',
+            '--import',
+            ...publicKeyFiles
+        ], options);
+        await _actions_exec__WEBPACK_IMPORTED_MODULE_4__/* .exec */ .m('gpg', [
+            '--homedir',
+            toGpgPath(gpgHome),
+            '--batch',
+            '--verify',
+            toGpgPath(signaturePath),
+            toGpgPath(archivePath)
+        ], options);
+    }
+    finally {
+        await stopGpgAgent(gpgHome);
+        await _actions_io__WEBPACK_IMPORTED_MODULE_3__/* .rmRF */ .Yz(signaturePath);
+        await _actions_io__WEBPACK_IMPORTED_MODULE_3__/* .rmRF */ .Yz(gpgHome);
+    }
+}
+
+
+/***/ }),
+
+/***/ 22:
+/***/ ((__unused_webpack_module, __webpack_exports__, __webpack_require__) => {
+
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   I: () => (/* binding */ escapeXmlText),
+/* harmony export */   R: () => (/* binding */ escapeXmlAttribute)
+/* harmony export */ });
+function escapeXmlText(value) {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+// Use for user-controlled values written into XML attributes. Text nodes should
+// use escapeXmlText so quotes remain byte-compatible with previous output.
+function escapeXmlAttribute(value) {
+    return escapeXmlText(value).replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+
+/***/ })
+
+};

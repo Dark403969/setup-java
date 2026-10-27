@@ -1,19 +1,75 @@
 export const MACOS_JAVA_CONTENT_POSTFIX = 'Contents/Home';
 export const INPUT_JAVA_VERSION = 'java-version';
+export const INPUT_JAVA_VERSION_FILE = 'java-version-file';
 export const INPUT_ARCHITECTURE = 'architecture';
 export const INPUT_JAVA_PACKAGE = 'java-package';
 export const INPUT_DISTRIBUTION = 'distribution';
-export const INPUT_JDK_FILE = 'jdkFile';
+export const INPUT_JDK_FILE = 'jdk-file';
+export const INPUT_JDK_FILE_DEPRECATED = 'jdkFile';
 export const INPUT_CHECK_LATEST = 'check-latest';
+export const INPUT_FORCE_DOWNLOAD = 'force-download';
+export const INPUT_SET_DEFAULT = 'set-default';
+export const INPUT_PROBLEM_MATCHER = 'problem-matcher';
+export const INPUT_VERIFY_SIGNATURE = 'verify-signature';
+export const INPUT_VERIFY_SIGNATURE_PUBLIC_KEY = 'verify-signature-public-key';
+export const SIGNATURE_VERIFICATION_DOCUMENTATION_URL =
+  'https://github.com/actions/setup-java#download-integrity-and-signatures';
+export const SIGNATURE_VERIFICATION_FAILURE_HELP = `If this is a legitimate vendor signing-key rotation, see ${SIGNATURE_VERIFICATION_DOCUMENTATION_URL} for instructions to configure the updated public key or temporarily disable signature verification.`;
+export const INPUT_MVN_SERVER_CREDENTIALS = 'mvn-server-credentials';
+export const INPUT_MVN_SERVER_REPOSITORY_ORIGINS =
+  'mvn-server-repository-origins';
+export const INPUT_MVN_REPOSITORIES = 'mvn-repositories';
+export const INPUT_MVN_PLUGIN_REPOSITORIES = 'mvn-plugin-repositories';
+export const INPUT_MVN_REPOSITORIES_INCLUDE_CENTRAL =
+  'mvn-repositories-include-central';
+export const INPUT_MVN_REPOSITORIES_PRIORITIZE_CENTRAL =
+  'mvn-repositories-prioritize-central';
 export const INPUT_SERVER_ID = 'server-id';
-export const INPUT_SERVER_USERNAME = 'server-username';
-export const INPUT_SERVER_PASSWORD = 'server-password';
+export const INPUT_SERVER_USERNAME_ENV_VAR = 'server-username-env-var';
+export const INPUT_SERVER_PASSWORD_ENV_VAR = 'server-password-env-var';
+export const INPUT_SERVER_USERNAME_DEPRECATED = 'server-username';
+export const INPUT_SERVER_PASSWORD_DEPRECATED = 'server-password';
 export const INPUT_SETTINGS_PATH = 'settings-path';
 export const INPUT_OVERWRITE_SETTINGS = 'overwrite-settings';
 export const INPUT_GPG_PRIVATE_KEY = 'gpg-private-key';
-export const INPUT_GPG_PASSPHRASE = 'gpg-passphrase';
+export const INPUT_GPG_PASSPHRASE_ENV_VAR = 'gpg-passphrase-env-var';
+export const INPUT_GPG_PASSPHRASE_DEPRECATED = 'gpg-passphrase';
 
+export const INPUT_DEFAULT_SERVER_USERNAME = 'GITHUB_ACTOR';
+export const INPUT_DEFAULT_SERVER_PASSWORD = 'GITHUB_TOKEN';
 export const INPUT_DEFAULT_GPG_PRIVATE_KEY = undefined;
 export const INPUT_DEFAULT_GPG_PASSPHRASE = 'GPG_PASSPHRASE';
 
-export const STATE_GPG_PRIVATE_KEY_FINGERPRINT = 'gpg-private-key-fingerprint';
+// The default name of the environment variable the maven-gpg-plugin reads the
+// passphrase from (property `gpg.passphraseEnvName`). When the configured
+// passphrase env var name matches this, no extra configuration is required.
+export const MAVEN_GPG_PASSPHRASE_DEFAULT_ENV = 'MAVEN_GPG_PASSPHRASE';
+
+// Id of the settings.xml profile used to set `gpg.passphraseEnvName`.
+export const GPG_PASSPHRASE_PROFILE_ID = 'setup-java-gpg';
+export const MAVEN_REPOSITORIES_PROFILE_ID = 'setup-java-repositories';
+export const MAVEN_CENTRAL_REPOSITORY_ID = 'central';
+export const MAVEN_CENTRAL_REPOSITORY_URL =
+  'https://repo.maven.apache.org/maven2';
+
+export const INPUT_CACHE = 'cache';
+export const INPUT_CACHE_JDK = 'cache-jdk';
+export const INPUT_CACHE_DEPENDENCY_PATH = 'cache-dependency-path';
+export const INPUT_CACHE_PATH = 'cache-path';
+export const INPUT_CACHE_READ_ONLY = 'cache-read-only';
+export const INPUT_JOB_STATUS = 'job-status';
+
+export const STATE_GPG_HOME = 'gpg-home';
+
+export const M2_DIR = '.m2';
+export const MVN_SETTINGS_FILE = 'settings.xml';
+export const MVN_TOOLCHAINS_FILE = 'toolchains.xml';
+export const INPUT_MVN_TOOLCHAIN_ID = 'mvn-toolchain-id';
+export const INPUT_MVN_TOOLCHAIN_VENDOR = 'mvn-toolchain-vendor';
+export const INPUT_SHOW_DOWNLOAD_PROGRESS = 'show-download-progress';
+
+export const MAVEN_ARGS_ENV = 'MAVEN_ARGS';
+export const MAVEN_NO_TRANSFER_PROGRESS_FLAG = '-ntp';
+export const MAVEN_NO_TRANSFER_PROGRESS_LONG_FLAG = '--no-transfer-progress';
+
+export const DISTRIBUTIONS_ONLY_MAJOR_VERSION = ['corretto'];

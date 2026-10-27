@@ -1,0 +1,357 @@
+import {
+  jest,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  afterAll
+} from '@jest/globals';
+import fs from 'fs';
+import {HttpClient} from '@actions/http-client';
+
+import manifestData from '../data/dragonwell.json' with {type: 'json'};
+
+// Mock @actions/core before importing source modules that depend on it
+jest.unstable_mockModule('@actions/core', () => ({
+  info: jest.fn(),
+  warning: jest.fn(),
+  debug: jest.fn(),
+  error: jest.fn(),
+  notice: jest.fn(),
+  setFailed: jest.fn(),
+  setOutput: jest.fn(),
+  getInput: jest.fn(),
+  getBooleanInput: jest.fn(),
+  getMultilineInput: jest.fn(),
+  addPath: jest.fn(),
+  exportVariable: jest.fn(),
+  saveState: jest.fn(),
+  getState: jest.fn(),
+  setSecret: jest.fn(),
+  isDebug: jest.fn(() => false),
+  startGroup: jest.fn(),
+  endGroup: jest.fn(),
+  group: jest.fn((_name: string, fn: () => Promise<unknown>) => fn()),
+  toPlatformPath: jest.fn((p: string) => p),
+  toWin32Path: jest.fn((p: string) => p),
+  toPosixPath: jest.fn((p: string) => p)
+}));
+
+const real_util_module = await import('../../src/util.js');
+jest.unstable_mockModule('../../src/util.js', () => ({
+  ...real_util_module,
+  getDownloadArchiveExtension: jest.fn()
+}));
+
+// Dynamic imports after mocking
+const core = await import('@actions/core');
+const {DragonwellDistribution} =
+  await import('../../src/distributions/dragonwell/installer.js');
+const utils = await import('../../src/util.js');
+
+describe('getAvailableVersions', () => {
+  let spyHttpClient: any;
+  let spyUtilGetDownloadArchiveExtension: any;
+  let spyCoreError: any;
+
+  beforeEach(() => {
+    spyHttpClient = jest.spyOn(HttpClient.prototype, 'getJson');
+    spyHttpClient.mockReturnValue({
+      statusCode: 200,
+      headers: {},
+      result: manifestData
+    });
+
+    spyUtilGetDownloadArchiveExtension =
+      utils.getDownloadArchiveExtension as jest.Mock;
+    spyUtilGetDownloadArchiveExtension.mockReturnValue('tar.gz');
+
+    // Mock core.error to suppress error logs
+    spyCoreError = core.error as jest.Mock;
+    spyCoreError.mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.resetAllMocks();
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+  });
+
+  const mockPlatform = (
+    distribution: InstanceType<typeof DragonwellDistribution>,
+    platform: string
+  ) => {
+    distribution['getPlatformOption'] = () => platform;
+    const mockedExtension = platform == 'windows' ? 'zip' : 'tar.gz';
+    spyUtilGetDownloadArchiveExtension.mockReturnValue(mockedExtension);
+  };
+
+  describe('getAvailableVersions', () => {
+    it.each([
+      ['8', 'x86', 'linux', 0],
+      ['8', 'aarch64', 'linux', 28],
+      ['8.6.6', 'x64', 'linux', 31],
+      ['8', 'x86', 'anolis', 0],
+      ['8', 'x86', 'windows', 0],
+      ['8', 'x86', 'mac', 0],
+      ['11', 'x64', 'linux', 31],
+      ['11', 'aarch64', 'linux', 28],
+      ['17', 'riscv', 'linux', 3],
+      ['16.0.1', 'x64', 'linux', 31],
+      ['21', 'x64', 'linux', 31]
+    ])(
+      'should get right number of available versions from JSON',
+      async (
+        jdkVersion: string,
+        arch: string,
+        platform: string,
+        len: number
+      ) => {
+        const distribution = new DragonwellDistribution({
+          version: jdkVersion,
+          architecture: arch,
+          packageType: 'jdk',
+          checkLatest: false
+        });
+        mockPlatform(distribution, platform);
+
+        const availableVersions = await distribution['getAvailableVersions']();
+        expect(availableVersions).not.toBeNull();
+        expect(availableVersions.length).toBe(len);
+      }
+    );
+  });
+
+  describe('findPackageForDownload', () => {
+    it.each([
+      [
+        '8',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell8/releases/download/dragonwell-extended-8.13.14_jdk8u352-ga/Alibaba_Dragonwell_Extended_8.13.14_x64_linux.tar.gz'
+      ],
+      [
+        '8',
+        'linux',
+        'aarch64',
+        'https://github.com/alibaba/dragonwell8/releases/download/dragonwell-extended-8.13.14_jdk8u352-ga/Alibaba_Dragonwell_Extended_8.13.14_aarch64_linux.tar.gz'
+      ],
+      [
+        '8',
+        'windows',
+        'x64',
+        'https://github.com/alibaba/dragonwell8/releases/download/dragonwell-extended-8.13.14_jdk8u352-ga/Alibaba_Dragonwell_Extended_8.13.14_x64_windows.zip'
+      ],
+      [
+        '8.13.14',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell8/releases/download/dragonwell-extended-8.13.14_jdk8u352-ga/Alibaba_Dragonwell_Extended_8.13.14_x64_linux.tar.gz'
+      ],
+      [
+        '11',
+        'linux',
+        'x64',
+        'https://github.com/dragonwell-project/dragonwell11/releases/download/dragonwell-extended-11.0.23.20_jdk-11.0.23-ga/Alibaba_Dragonwell_Extended_11.0.23.20.9_x64_linux.tar.gz'
+      ],
+      [
+        '11',
+        'linux',
+        'aarch64',
+        'https://github.com/dragonwell-project/dragonwell11/releases/download/dragonwell-extended-11.0.23.20_jdk-11.0.23-ga/Alibaba_Dragonwell_Extended_11.0.23.20.9_aarch64_linux.tar.gz'
+      ],
+      [
+        '11',
+        'linux',
+        'riscv',
+        'https://github.com/dragonwell-project/dragonwell11/releases/download/dragonwell-extended-11.0.23.20_jdk-11.0.23-ga/Alibaba_Dragonwell_Extended_11.0.23.20.9_riscv64_linux.tar.gz'
+      ],
+      [
+        '11',
+        'windows',
+        'x64',
+        'https://github.com/dragonwell-project/dragonwell11/releases/download/dragonwell-extended-11.0.23.20_jdk-11.0.23-ga/Alibaba_Dragonwell_Extended_11.0.23.20.9_x64_windows.zip'
+      ],
+      [
+        '11',
+        'alpine-linux',
+        'x64',
+        'https://github.com/dragonwell-project/dragonwell11/releases/download/dragonwell-extended-11.0.23.20_jdk-11.0.23-ga/Alibaba_Dragonwell_Extended_11.0.23.20.9_x64_alpine-linux.tar.gz'
+      ],
+      [
+        '11.0.17',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell11/releases/download/dragonwell-extended-11.0.17.13_jdk-11.0.17-ga/Alibaba_Dragonwell_Extended_11.0.17.13.8_x64_linux.tar.gz'
+      ],
+      [
+        '17',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.5.0.5%2B8_jdk-17.0.5-ga/Alibaba_Dragonwell_Standard_17.0.5.0.5.8_x64_linux.tar.gz'
+      ],
+      [
+        '17',
+        'linux',
+        'aarch64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.5.0.5%2B8_jdk-17.0.5-ga/Alibaba_Dragonwell_Standard_17.0.5.0.5.8_aarch64_linux.tar.gz'
+      ],
+      [
+        '17',
+        'windows',
+        'x64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.5.0.5%2B8_jdk-17.0.5-ga/Alibaba_Dragonwell_Standard_17.0.5.0.5.8_x64_windows.zip'
+      ],
+      [
+        '17',
+        'alpine-linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.5.0.5%2B8_jdk-17.0.5-ga/Alibaba_Dragonwell_Standard_17.0.5.0.5.8_x64_alpine-linux.tar.gz'
+      ],
+      [
+        '17.0.4',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.4.0.4%2B8_jdk-17.0.4-ga/Alibaba_Dragonwell_Standard_17.0.4.0.4%2B8_x64_linux.tar.gz'
+      ],
+      [
+        '17.0.4+8',
+        'linux',
+        'x64',
+        'https://github.com/alibaba/dragonwell17/releases/download/dragonwell-standard-17.0.4.0.4%2B8_jdk-17.0.4-ga/Alibaba_Dragonwell_Standard_17.0.4.0.4%2B8_x64_linux.tar.gz'
+      ],
+      [
+        '21',
+        'linux',
+        'aarch64',
+        'https://github.com/dragonwell-project/dragonwell21/releases/download/dragonwell-standard-21.0.3.0.3%2B9_jdk-21.0.3-ga/Alibaba_Dragonwell_Standard_21.0.3.0.3.9_aarch64_linux.tar.gz'
+      ],
+      [
+        '21.0.3+9',
+        'linux',
+        'riscv',
+        'https://github.com/dragonwell-project/dragonwell21/releases/download/dragonwell-standard-21.0.3.0.3%2B9_jdk-21.0.3-ga/Alibaba_Dragonwell_Standard_21.0.3.0.3.9_riscv64_linux.tar.gz'
+      ],
+      [
+        '21.0.1+12',
+        'linux',
+        'x64',
+        'https://github.com/dragonwell-project/dragonwell21/releases/download/dragonwell-standard-21.0.1.0.1%2B12_jdk-21.0.1-ga/Alibaba_Dragonwell_Standard_21.0.1.0.1.12_x64_linux.tar.gz'
+      ]
+    ])(
+      'should return proper link according to the specified java-version, platform and arch',
+      async (
+        jdkVersion: string,
+        platform: string,
+        arch: string,
+        expectedLink: string
+      ) => {
+        const distribution = new DragonwellDistribution({
+          version: jdkVersion,
+          architecture: arch,
+          packageType: 'jdk',
+          checkLatest: false
+        });
+        mockPlatform(distribution, platform);
+
+        const availableVersion =
+          await distribution['findPackageForDownload'](jdkVersion);
+        expect(availableVersion).not.toBeNull();
+        expect(availableVersion.url).toBe(expectedLink);
+        expect(availableVersion.checksum).toEqual({
+          algorithm: 'sha256',
+          value: expect.stringMatching(/^[a-f0-9]{64}$/)
+        });
+      }
+    );
+
+    it.each([
+      ['8', 'alpine-linux', 'x64'],
+      ['8', 'macos', 'aarch64'],
+      ['11', 'macos', 'aarch64'],
+      ['17', 'linux', 'riscv']
+    ])(
+      'should throw when required version of JDK cannot be found in the JSON',
+      async (jdkVersion: string, platform: string, arch: string) => {
+        const distribution = new DragonwellDistribution({
+          version: jdkVersion,
+          architecture: arch,
+          packageType: 'jdk',
+          checkLatest: false
+        });
+        mockPlatform(distribution, platform);
+
+        await expect(
+          distribution['findPackageForDownload'](jdkVersion)
+        ).rejects.toThrow(
+          `No matching version found for SemVer '${jdkVersion}'`
+        );
+      }
+    );
+
+    it('should throw when required package type is not jdk', async () => {
+      const jdkVersion = '17';
+      const arch = 'x64';
+      const platform = 'linux';
+      const distribution = new DragonwellDistribution({
+        version: jdkVersion,
+        architecture: arch,
+        packageType: 'jre',
+        checkLatest: false
+      });
+      mockPlatform(distribution, platform);
+      await expect(
+        distribution['findPackageForDownload'](jdkVersion)
+      ).rejects.toThrow('Dragonwell provides only the `jdk` package type');
+    });
+  });
+});
+
+describe('Dragonwell getPlatformOption libc selection', () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(
+    process,
+    'platform'
+  ) as PropertyDescriptor;
+
+  const setPlatform = (platform: NodeJS.Platform) =>
+    Object.defineProperty(process, 'platform', {
+      ...originalPlatform,
+      value: platform
+    });
+
+  const distribution = new DragonwellDistribution({
+    version: '21',
+    architecture: 'x64',
+    packageType: 'jdk',
+    checkLatest: false
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', originalPlatform);
+    jest.restoreAllMocks();
+  });
+
+  it('selects the musl artifacts on Alpine', () => {
+    setPlatform('linux');
+    jest.spyOn(fs, 'existsSync').mockReturnValue(true);
+
+    expect(distribution['getPlatformOption']()).toBe('alpine-linux');
+  });
+
+  it('selects the glibc artifacts on other Linux runners', () => {
+    setPlatform('linux');
+    jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+    expect(distribution['getPlatformOption']()).toBe('linux');
+  });
+
+  it('does not probe for Alpine off Linux', () => {
+    setPlatform('win32');
+    const existsSync = jest.spyOn(fs, 'existsSync');
+
+    expect(distribution['getPlatformOption']()).toBe('windows');
+    expect(existsSync).not.toHaveBeenCalled();
+  });
+});
